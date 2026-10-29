@@ -77,7 +77,9 @@ public class SceneSyncService : MediatorSubscriberBase
     public string? LastError { get; private set; }
     public IReadOnlyList<SyncPeer> Peers => _peers;
 
-    public string RelayUrl => _configurationService.Configuration.Sync.RelayUrl;
+    public string RelayUrl => string.IsNullOrWhiteSpace(_configurationService.Configuration.Sync.RelayUrl)
+        ? SyncConfiguration.DefaultRelayUrl
+        : _configurationService.Configuration.Sync.RelayUrl.Trim();
     public bool HasRelay => Uri.TryCreate(RelayUrl, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp);
 
     // Raised when someone joins or asks to sync, so the Sync window can open.
@@ -681,11 +683,11 @@ public class SceneSyncService : MediatorSubscriberBase
         base.Dispose();
     }
 
-    private class RemoteItem(SyncPeer owner, LightDTO dto, ushort territory)
+    private class RemoteItem(SyncPeer owner, LightDTO dto, uint territory)
     {
         public SyncPeer Owner { get; } = owner;
         public LightDTO Dto { get; set; } = dto;
-        public ushort Territory { get; set; } = territory;
+        public uint Territory { get; set; } = territory;
         public LightEntity? Entity { get; set; }
         public bool Spawning { get; set; }
         public bool Dirty { get; set; }

@@ -24,7 +24,7 @@ public class SyncOp
     public SyncOpKind Kind { get; set; }
     public Guid SyncId { get; set; }
     public SyncEntityType Type { get; set; }
-    public ushort Territory { get; set; }
+    public uint Territory { get; set; }
     public byte[]? Payload { get; set; }
 }
 

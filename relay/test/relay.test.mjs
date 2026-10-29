@@ -11,6 +11,8 @@ let server;
 before(async () => {
   server = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1"], {
     stdio: "ignore",
+    // npx is a .cmd on Windows, which only runs through a shell.
+    shell: process.platform === "win32",
     env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
   });
   for (let i = 0; i < 120; i++) {
