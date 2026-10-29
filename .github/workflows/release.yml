@@ -1,23 +1,34 @@
-name: Release Brio
+name: Release FlashBang
 
 permissions:
   contents: write
 
+# Every push to main publishes a new version, so Dalamud picks up updates on its own.
 on:
+  push:
+    branches:
+    - main
+    paths-ignore:
+    - 'repo.json'
+    - '**.md'
+    - 'relay/**'
   workflow_dispatch:
     inputs:
-      version:
-        description: Version to create
-        required: true
       testing:
         description: Publish as a testing release
         type: boolean
         required: false
         default: false
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      VERSION: 0.1.0.${{ github.run_number }}
 
     steps:
     - name: Checkout
@@ -39,30 +50,31 @@ jobs:
     - name: Restore Dependencies
       run: dotnet restore Brio.slnx
 
-    - name: Build Brio
-      run: dotnet build Brio.slnx --no-restore /p:Configuration=Release /p:Version=${{ github.event.inputs.version }}
+    - name: Build FlashBang
+      run: dotnet build Brio.slnx --no-restore /p:Configuration=Release /p:Version=${{ env.VERSION }}
 
     - name: Zip Release
       uses: TheDoctor0/zip-release@0.6.0
       with:
-        filename: '../../../../Brio.zip'
+        filename: '../../../../FlashBang.zip'
         directory: './Brio/bin/x64/Release/'
-        exclusions: 'Brio Brio/*'
+        exclusions: 'FlashBang FlashBang/*'
 
     - name: Upload Release
       uses: ncipollo/release-action@v1
       with:
         allowUpdates: true
-        artifacts: "./Brio.zip"
-        name: Brio v${{ github.event.inputs.version }}
-        tag: v${{ github.event.inputs.version }}
+        artifacts: "./FlashBang.zip"
+        name: FlashBang v${{ env.VERSION }}
+        tag: v${{ env.VERSION }}
         draft: false
+        prerelease: ${{ github.event.inputs.testing == 'true' }}
         token: ${{ secrets.GITHUB_TOKEN }}
-        commit: ${{ vars.GITHUB_SHA }}
+        commit: ${{ github.sha }}
 
     - name: Update repo.json
       uses: ./.github/actions/update-repo
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        version: ${{ github.event.inputs.version }}
-        testing: ${{ github.event.inputs.testing }}
+        version: ${{ env.VERSION }}
+        testing: ${{ github.event.inputs.testing || 'false' }}

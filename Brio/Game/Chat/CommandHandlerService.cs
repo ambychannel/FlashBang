@@ -8,9 +8,9 @@ namespace Brio.Game.Chat;
 
 public class CommandHandlerService : IDisposable
 {
-    private const string BrioCommandName = "/brio";
-    private const string XATCommandName = "/xat";
-    private const string MCDFCommandName = "/mcdf";
+    private const string BrioCommandName = "/flashbang";
+    private const string XATCommandName = "/fbxat";
+    private const string MCDFCommandName = "/fbmcdf";
 
     private readonly ICommandManager _commandManager;
     private readonly IChatGui _chatGui;
@@ -26,17 +26,17 @@ public class CommandHandlerService : IDisposable
 
         _commandManager.AddHandler(BrioCommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggles the Brio window.",
+            HelpMessage = "Toggles the FlashBang window.",
             ShowInHelp = true,
         });
         _commandManager.AddHandler(XATCommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggles the Brio window.",
+            HelpMessage = "Toggles the FlashBang window.",
             ShowInHelp = false,
         });
         _commandManager.AddHandler(MCDFCommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggles Brio's MCDF window.",
+            HelpMessage = "Toggles FlashBang's MCDF window.",
             ShowInHelp = false,
         });
     }

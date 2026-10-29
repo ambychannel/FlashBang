@@ -49,7 +49,7 @@ public class Brio(IDalamudPluginInterface pluginInterface) : IAsyncDalamudPlugin
     public const int MajorAPIVersion = 3;
     public const int MinorAPIVersion = 0;
 
-    public const string Name = "BRIO";
+    public const string Name = "FLASHBANG";
 
     private readonly IDalamudPluginInterface _pluginInterface = pluginInterface;
     private static ServiceProvider? _services = null;

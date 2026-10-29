@@ -10,6 +10,8 @@
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
 		<Version>0.0.0.1</Version>
+		<AssemblyName>FlashBang</AssemblyName>
+		<RootNamespace>Brio</RootNamespace>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -40,7 +42,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<None Update="Brio.json">
+		<None Update="FlashBang.json">
 			<CopyToOutputDirectory>Never</CopyToOutputDirectory>
 		</None>
 	</ItemGroup>

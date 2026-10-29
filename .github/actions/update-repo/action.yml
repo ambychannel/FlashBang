@@ -15,7 +15,7 @@ inputs:
     default: 'main'
   project:
     required: false
-    default: 'Brio'
+    default: 'FlashBang'
 
 runs:
   using: 'composite'
@@ -64,7 +64,7 @@ runs:
 
         $headers = @{
           Authorization = "Bearer $env:GITHUB_TOKEN"
-          'User-Agent'  = 'brio-ci'
+          'User-Agent'  = 'flashbang-ci'
           Accept        = 'application/vnd.github+json'
         }
         $total = 0
