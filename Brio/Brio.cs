@@ -23,6 +23,7 @@ using Brio.Resources;
 using Brio.Services;
 using Brio.Services.Models;
 using Brio.Services.Timeline;
+using Brio.Sync;
 using Brio.UI;
 using Brio.UI.Controls.Editors;
 using Brio.UI.Modals;
@@ -210,6 +211,7 @@ public class Brio(IDalamudPluginInterface pluginInterface) : IAsyncDalamudPlugin
         serviceCollection.AddSingleton<ReferenceImageService>();
         serviceCollection.AddSingleton<PathMetadataService>();
         serviceCollection.AddSingleton<QuickAccessService>();
+        serviceCollection.AddSingleton<SceneSyncService>();
 
         // API & Web
         serviceCollection.AddSingleton<BrioAPIService>();
@@ -306,6 +308,7 @@ public class Brio(IDalamudPluginInterface pluginInterface) : IAsyncDalamudPlugin
         serviceCollection.AddSingleton<LightWindow>();
         serviceCollection.AddSingleton<EntitySectionWindow>();
         serviceCollection.AddSingleton<TimelineWindow>();
+        serviceCollection.AddSingleton<SyncWindow>();
 
 
         return serviceCollection;

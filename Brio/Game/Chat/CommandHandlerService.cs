@@ -76,6 +76,10 @@ public class CommandHandlerService : IDisposable
                 _uiManager.ToggleMCDFWindow();
                 break;
 
+            case "sync":
+                _uiManager.ToggleSyncWindow();
+                break;
+
             case "mediator":
                 _mediator.PrintSubscriberInfo();
                 break;
@@ -90,11 +94,12 @@ public class CommandHandlerService : IDisposable
 
     private void PrintHelp()
     {
-        _chatGui.Print("Valid Brio Commands Are:");
-        _chatGui.Print("<none> - Toggle main Brio window");
-        _chatGui.Print("window - Toggle main Brio window");
-        _chatGui.Print("settings - Toggle Brio settings window");
-        _chatGui.Print("about - Toggle Brio info window");
+        _chatGui.Print("Valid FlashBang Commands Are:");
+        _chatGui.Print("<none> - Toggle main FlashBang window");
+        _chatGui.Print("window - Toggle main FlashBang window");
+        _chatGui.Print("sync - Toggle the Sync window (rooms and agreeing to sync)");
+        _chatGui.Print("settings - Toggle FlashBang settings window");
+        _chatGui.Print("about - Toggle FlashBang info window");
         _chatGui.Print("help - Print this help prompt");
     }
 

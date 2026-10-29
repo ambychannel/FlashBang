@@ -60,6 +60,9 @@ public class Configuration : IPluginConfiguration
     // AutoSave
     public AutoSaveConfiguration AutoSave { get; set; } = new AutoSaveConfiguration();
 
+    // FlashBang multiplayer sync
+    public SyncConfiguration Sync { get; set; } = new SyncConfiguration();
+
     // Developer
     public bool ForceDebug { get; set; } = false;
 }

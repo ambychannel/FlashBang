@@ -8,6 +8,7 @@ using Brio.Game.World;
 using Brio.Game.World.Interop;
 using Brio.Game.WorldObjects;
 using Brio.Services;
+using Brio.Sync;
 using Brio.UI.Controls.Core;
 using Brio.UI.Controls.Stateless;
 using Dalamud.Bindings.ImGui;
@@ -35,6 +36,7 @@ public class SpawnMenu
     private static EntityManager _entityManager => Instance!.provider.GetRequiredService<EntityManager>();
     private static ReferenceImageService _referenceImageService => Instance!.provider.GetRequiredService<ReferenceImageService>();
     private static ObjectMonitorService _objectMonitorService => Instance!.provider.GetRequiredService<ObjectMonitorService>();
+    private static SceneSyncService _sceneSyncService => Instance!.provider.GetRequiredService<SceneSyncService>();
 
     static SpawnMenu Instance = null!;
     public void Initialize(IServiceProvider serviceProvider)
@@ -282,6 +284,12 @@ public class SpawnMenu
             if(ImBrio.IconButtonWithText(FontAwesomeIcon.FolderPlus, "Folder", buttonSize))
             {
                 _entityManager.CreateEntityOnEntityContainer<FolderEntity>($"Folder");
+            }
+
+            if(ImBrio.IconButtonWithText(FontAwesomeIcon.Link, "Sync Folder", buttonSize))
+            {
+                _sceneSyncService.EnsureSyncFolder();
+                ImGui.CloseCurrentPopup();
             }
         }
     }

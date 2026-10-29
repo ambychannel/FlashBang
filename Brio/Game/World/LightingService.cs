@@ -439,7 +439,7 @@ public unsafe class LightingService : MediatorSubscriberBase
         };
     }
 
-    public void SpawnFromDTO(LightDTO dto, Vector3? anchor = null, FolderEntity? folder = null)
+    public void SpawnFromDTO(LightDTO dto, Vector3? anchor = null, FolderEntity? folder = null, Action<LightEntity>? onSpawned = null)
     {
         _framework.RunOnFrameworkThread(() =>
        {
@@ -476,6 +476,8 @@ public unsafe class LightingService : MediatorSubscriberBase
 
            if(folder is not null)
                _entityManager.MoveEntity(entity, folder);
+
+           onSpawned?.Invoke(entity);
        });
     }
 

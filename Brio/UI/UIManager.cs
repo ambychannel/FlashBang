@@ -3,6 +3,7 @@ using Brio.Game.GPose;
 using Brio.Input;
 using Brio.IPC;
 using Brio.Services;
+using Brio.Sync;
 using Brio.UI.Controls.Editors;
 using Brio.UI.Windows;
 using Brio.UI.Windows.Specialized;
@@ -41,6 +42,7 @@ public class UIManager : IDisposable
     private readonly LightWindow _lightWindow;
     private readonly EntitySectionWindow _entitySectionWindow;
     private readonly TimelineWindow _timelineWindow;
+    private readonly SyncWindow _syncWindow;
 
     private readonly CatalogWindow _catalogWindow;
     private readonly ReferenceImageService _referenceImageService;
@@ -104,6 +106,7 @@ public class UIManager : IDisposable
             LightWindow lightWindow,
             EntitySectionWindow entitySectionWindow,
             TimelineWindow timelineWindow,
+            SyncWindow syncWindow,
             CatalogWindow furnitureCatalogWindow,
             ReferenceImageService referenceImageService,
 
@@ -139,6 +142,7 @@ public class UIManager : IDisposable
         _lightWindow = lightWindow;
         _entitySectionWindow = entitySectionWindow;
         _timelineWindow = timelineWindow;
+        _syncWindow = syncWindow;
         _catalogWindow = furnitureCatalogWindow;
         _referenceImageService = referenceImageService;
 
@@ -169,6 +173,7 @@ public class UIManager : IDisposable
         _windowSystem.AddWindow(_lightWindow);
         _windowSystem.AddWindow(_entitySectionWindow);
         _windowSystem.AddWindow(_timelineWindow);
+        _windowSystem.AddWindow(_syncWindow);
         _windowSystem.AddWindow(_catalogWindow);
 
         _gPoseService.OnGPoseStateChange += OnGPoseStateChange;
@@ -204,6 +209,11 @@ public class UIManager : IDisposable
     public void ToggleTimelineWindow()
     {
         _timelineWindow.IsOpen = !_timelineWindow.IsOpen;
+    }
+
+    public void ToggleSyncWindow()
+    {
+        _syncWindow.IsOpen = !_syncWindow.IsOpen;
     }
 
     public void ToggleCatalogWindow()
