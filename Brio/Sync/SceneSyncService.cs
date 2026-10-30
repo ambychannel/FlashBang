@@ -200,8 +200,21 @@ public class SceneSyncService : MediatorSubscriberBase
     public SyncFolderEntity? FindSyncFolder()
         => Descendants(_entityManager.EntityManagerContainer).OfType<SyncFolderEntity>().FirstOrDefault();
 
-    // True for anything another player shared with us, which isn't ours to save or re-share.
-    public bool IsRemoteItem(Entity entity) => _remote.Values.Any(i => i.Entity?.Id == entity.Id);
+    // True for anything another player shared with us (or part of it, like their actor's minion),
+    // which isn't ours to save or re-share.
+    public bool IsRemoteItem(Entity entity)
+    {
+        if(_remote.Count == 0)
+            return false;
+
+        for(Entity? e = entity; e is not null; e = e.Parent)
+        {
+            if(_remote.Values.Any(i => i.Entity?.Id == e.Id))
+                return true;
+        }
+
+        return false;
+    }
 
     //
 

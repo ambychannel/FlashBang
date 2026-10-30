@@ -10,14 +10,14 @@ using System.Linq;
 
 namespace Brio.Sync;
 
-// The "Sync" folder in the scene list. Lights placed in it are shared with the room;
-// other players' lights appear in a sub-folder per player.
+// The "Sync" folder in the scene list. Everything placed in it is shared with the room;
+// other players' things appear in a sub-folder per player.
 public class SyncFolderEntity : FolderEntity
 {
     public override FontAwesomeIcon Icon => FontAwesomeIcon.Link;
     public override int ContextButtonCount => 2;
 
-    // Not renameable, but lights still have to be dropped in to be shared.
+    // Not renameable, but things still have to be dropped in to be shared.
     public override bool AcceptsDrops => true;
 
     public SyncFolderEntity(IServiceProvider serviceProvider) : base("Sync", serviceProvider)

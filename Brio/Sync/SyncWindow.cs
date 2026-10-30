@@ -88,7 +88,7 @@ public class SyncWindow : Window, IDisposable
 
     private void DrawLobby()
     {
-        ImGui.TextUnformatted("Share lights with a friend in GPose. Create a room and send them the code, or join theirs.");
+        ImGui.TextUnformatted("Share your GPose scene with a friend. Create a room and send them the code, or join theirs.");
         ImGui.Spacing();
 
         if(ImBrio.Button("Create a room", FontAwesomeIcon.Plus))
@@ -117,7 +117,7 @@ public class SyncWindow : Window, IDisposable
             ImGui.SetClipboardText(code);
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Lights you put in the Sync folder are shared with everyone you've agreed to sync with. Their lights appear in the Sync folder too.");
+        ImGui.TextDisabled("Everything you put in the Sync folder (actors, lights, props, furniture, VFX, cameras and reference images) is shared with everyone you've agreed to sync with. Their things appear in the Sync folder too. Mods don't carry over, so modded looks show as their Glamourer or game appearance.");
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();

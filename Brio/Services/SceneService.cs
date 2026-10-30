@@ -19,6 +19,7 @@ using Brio.Game.World;
 using Brio.Game.WorldObjects;
 using Brio.IPC;
 using Brio.Services.Models;
+using Brio.Sync;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Plugin.Services;
 using MessagePack;
@@ -52,7 +53,7 @@ public class BrioScene
     public List<FolderDTO> Folders { get; set; } = [];
 }
 
-public class SceneService(EntityManager _entityManager, GlamourerService _glamourerService, PenumbraService _penumbraService, CustomizePlusService _customizePlusService, VirtualCameraManager _virtualCameraManager, IFramework _framework, LightingService _lightingService, WorldObjectService _worldObjectService, IObjectTable _objectTable, ActorRedrawService _redrawService)
+public class SceneService(EntityManager _entityManager, GlamourerService _glamourerService, PenumbraService _penumbraService, CustomizePlusService _customizePlusService, VirtualCameraManager _virtualCameraManager, IFramework _framework, LightingService _lightingService, WorldObjectService _worldObjectService, IObjectTable _objectTable, ActorRedrawService _redrawService, SceneSyncService _sceneSyncService)
 {
     private const int FormatVersion = 1;
     private static readonly byte[] Magic = "BRIOSCN"u8.ToArray();
@@ -256,6 +257,10 @@ public class SceneService(EntityManager _entityManager, GlamourerService _glamou
 
         foreach(var entity in EnumerateEntities(_entityManager.EntityManagerContainer))
         {
+            // Other players' synced items belong to them, not to this scene.
+            if(_sceneSyncService.IsRemoteItem(entity))
+                continue;
+
             switch(entity)
             {
                 case ActorEntity actorEntity:

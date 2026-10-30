@@ -2,7 +2,7 @@
 
 Multiplayer GPose for Final Fantasy XIV, built on [Brio](https://github.com/Etheirys/Brio).
 
-Put lights, props and cameras in a **Sync** folder in the scene list, share a room code with a friend, and once they agree to sync, everything in that folder shows up in their GPose too, live.
+Put actors, lights, props, furniture, VFX, cameras and reference images in a **Sync** folder in the scene list, share a room code with a friend, and once they agree to sync, everything in that folder shows up in their GPose too, live.
 
 > FlashBang is an early, unofficial project. It is not made or supported by the Brio team or the Lightless team. Please don't report FlashBang problems to them.
 
@@ -22,13 +22,16 @@ Open FlashBang with `/flashbang`.
 
 | Milestone | What it adds | State |
 | --- | --- | --- |
-| 1 | Sync folder, room codes, lights | In progress |
-| 2 | "Agree to sync" prompt, leave room, safety limits | Planned |
-| 3 | Props, cameras, weather and time | Planned |
+| 1 | Sync folder, room codes, lights | Done |
+| 2 | "Agree to sync" prompt, leave room, safety limits | Done |
+| 3 | Actors (look, pose, minion or mount), props, furniture, world objects, VFX, cameras, reference images | Needs testing in game |
+| 4 | Weather and time | Planned |
 
 ## Works with Lightless
 
 FlashBang keeps Brio's IPC, so Lightless (including GPose Together) keeps working with it. Lightless still handles everyone's modded appearance; FlashBang handles the scene.
+
+Actors you sync are sent with their Glamourer state (or their Brio appearance if the other player doesn't have Glamourer), not their mods. Penumbra collections and Customize+ profiles only exist on your PC, so a synced actor shows up without them.
 
 ## Credits and license
 
