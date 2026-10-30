@@ -1,21 +1,18 @@
 using Brio.Capabilities.Folder;
-using Brio.Capabilities.World;
 using Brio.Config;
 using Brio.Entities;
 using Brio.Entities.Core;
-using Brio.Entities.World;
 using Brio.Game.GPose;
-using Brio.Game.World;
 using Brio.Services;
 using Brio.Services.MediatorMessages;
-using Brio.Services.Models;
+using Brio.Sync.Kinds;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Plugin.Services;
 using MessagePack;
+using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 
@@ -41,36 +38,39 @@ public class SyncPeer(string id, string name)
     public bool NeedsAnswer => TheyAgreed && !IAgreed;
 
     internal FolderEntity? Folder { get; set; }
+    internal SyncReassembler Reassembler { get; } = new();
+    internal bool WarnedAboutVersion { get; set; }
 }
 
-// Shares the lights in the Sync folder with everyone in the room who has agreed to sync,
-// and shows theirs in a sub-folder per player. Runs entirely on the framework thread;
-// network I/O lives in SyncRelayClient.
+// Shares everything in the Sync folder with everyone in the room who has agreed to sync, and
+// shows theirs in a sub-folder per player. Each kind of item (lights, actors...) is handled by a
+// SyncKind. Runs entirely on the framework thread; network I/O lives in SyncRelayClient.
 public class SceneSyncService : MediatorSubscriberBase
 {
-    private static readonly MessagePackSerializerOptions UntrustedOptions =
-        MessagePackSerializer.DefaultOptions.WithSecurity(MessagePackSecurity.UntrustedData);
-
     private readonly EntityManager _entityManager;
-    private readonly LightingService _lightingService;
     private readonly GPoseService _gPoseService;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
     private readonly IFramework _framework;
     private readonly ConfigurationService _configurationService;
+    private readonly IServiceProvider _serviceProvider;
 
     private SyncRelayClient? _client;
     private readonly List<SyncPeer> _peers = [];
+    private readonly SyncOutbox _outbox = new();
 
-    // Items we own: our entity -> stable id, and the last payload we sent for each id.
-    private readonly Dictionary<EntityId, Guid> _ownedIds = [];
-    private readonly Dictionary<Guid, string> _lastSent = [];
-    private DateTime _nextSend = DateTime.MinValue;
+    private List<SyncKind>? _kinds;
+    private List<SyncKind> Kinds => _kinds ??= [
+        ActivatorUtilities.CreateInstance<LightSyncKind>(_serviceProvider),
+    ];
+
+    // Items we own, by entity.
+    private readonly Dictionary<EntityId, OwnedItem> _owned = [];
+    private DateTime _nextCapture = DateTime.MinValue;
 
     // Items other players own, keyed by (owner, id). Kept even when they can't be shown
     // (outside GPose, different zone) so they reappear when they can.
     private readonly Dictionary<(string Owner, Guid Id), RemoteItem> _remote = [];
-    private readonly HashSet<EntityId> _remoteEntityIds = [];
 
     public SyncStatus Status { get; private set; } = SyncStatus.Offline;
     public string? RoomCode { get; private set; }
@@ -88,20 +88,20 @@ public class SceneSyncService : MediatorSubscriberBase
     public SceneSyncService(
         Mediator mediator,
         EntityManager entityManager,
-        LightingService lightingService,
         GPoseService gPoseService,
         IClientState clientState,
         IObjectTable objectTable,
         IFramework framework,
-        ConfigurationService configurationService) : base(mediator)
+        ConfigurationService configurationService,
+        IServiceProvider serviceProvider) : base(mediator)
     {
         _entityManager = entityManager;
-        _lightingService = lightingService;
         _gPoseService = gPoseService;
         _clientState = clientState;
         _objectTable = objectTable;
         _framework = framework;
         _configurationService = configurationService;
+        _serviceProvider = serviceProvider;
 
         Mediator.Subscribe<FrameworkUpdateMessage>(this, _ => OnFrameworkUpdate());
     }
@@ -196,7 +196,8 @@ public class SceneSyncService : MediatorSubscriberBase
     public SyncFolderEntity? FindSyncFolder()
         => Descendants(_entityManager.EntityManagerContainer).OfType<SyncFolderEntity>().FirstOrDefault();
 
-    public bool IsRemoteItem(Entity entity) => _remoteEntityIds.Contains(entity.Id);
+    // True for anything another player shared with us, which isn't ours to save or re-share.
+    public bool IsRemoteItem(Entity entity) => _remote.Values.Any(i => i.Entity?.Id == entity.Id);
 
     //
 
@@ -217,7 +218,7 @@ public class SceneSyncService : MediatorSubscriberBase
             DropPeer(peer);
 
         _peers.Clear();
-        _lastSent.Clear();
+        _outbox.Clear();
         Status = SyncStatus.Offline;
         RoomCode = null;
         LastError = error;
@@ -236,10 +237,16 @@ public class SceneSyncService : MediatorSubscriberBase
 
         ReconcileRemote();
 
-        if(Status == SyncStatus.Connected && DateTime.UtcNow >= _nextSend)
+        if(Status == SyncStatus.Connected && DateTime.UtcNow >= _nextCapture)
         {
-            _nextSend = DateTime.UtcNow + SyncLimits.SendInterval;
-            SendChanges();
+            _nextCapture = DateTime.UtcNow + SyncLimits.SendInterval;
+            CaptureOwned();
+        }
+
+        if(_client is not null && Status == SyncStatus.Connected)
+        {
+            foreach(var (data, to) in _outbox.Take())
+                _ = _client.SendOpAsync(data, to);
         }
     }
 
@@ -363,9 +370,11 @@ public class SceneSyncService : MediatorSubscriberBase
     {
         foreach(var key in _remote.Keys.Where(k => k.Owner == peer.Id).ToList())
         {
-            DespawnRemote(_remote[key]);
+            RemoveItem(_remote[key]);
             _remote.Remove(key);
         }
+
+        peer.Reassembler.Clear();
 
         if(peer.Folder is not null && _entityManager.EntityExists(peer.Folder.Id))
         {
@@ -388,7 +397,7 @@ public class SceneSyncService : MediatorSubscriberBase
         SyncBatch batch;
         try
         {
-            batch = MessagePackSerializer.Deserialize<SyncBatch>(Convert.FromBase64String(base64), UntrustedOptions);
+            batch = MessagePackSerializer.Deserialize<SyncBatch>(Convert.FromBase64String(base64), SyncCodec.UntrustedOptions);
         }
         catch(Exception ex)
         {
@@ -398,7 +407,13 @@ public class SceneSyncService : MediatorSubscriberBase
 
         if(batch.Version != SyncBatch.CurrentVersion)
         {
-            LastError = $"{peer.Name} is on a different FlashBang version. Both of you should update.";
+            if(!peer.WarnedAboutVersion)
+            {
+                peer.WarnedAboutVersion = true;
+                var who = batch.Version < SyncBatch.CurrentVersion ? peer.Name : "You";
+                LastError = $"{peer.Name} is on a different FlashBang version. {who} need{(who == "You" ? "" : "s")} to update FlashBang before you can sync.";
+                Brio.PopToast(LastError, "FlashBang Sync", NotificationType.Warning);
+            }
             return;
         }
 
@@ -408,118 +423,167 @@ public class SceneSyncService : MediatorSubscriberBase
 
             if(op.Kind == SyncOpKind.Remove)
             {
+                peer.Reassembler.Forget(op.SyncId);
                 if(_remote.Remove(key, out var gone))
-                    DespawnRemote(gone);
+                    RemoveItem(gone);
                 continue;
             }
 
-            if(op.Kind != SyncOpKind.Upsert || op.Type != SyncEntityType.Light || op.Payload is null || op.Payload.Length > SyncLimits.MaxPayloadBytes)
+            if(op.Kind != SyncOpKind.Upsert)
                 continue;
 
-            LightDTO dto;
+            var kind = Kinds.FirstOrDefault(k => k.Type == op.Type);
+            if(kind is null || op.Part >= kind.PartCount)
+                continue;
+
+            if(_remote.TryGetValue(key, out var existing) && existing.Kind != kind)
+                continue;
+
+            var whole = peer.Reassembler.Add(op);
+            if(whole is null)
+                continue;
+
+            object? value;
             try
             {
-                dto = MessagePackSerializer.Deserialize<LightDTO>(op.Payload, UntrustedOptions);
+                value = kind.Decode(op.Part, whole);
             }
-            catch(Exception)
+            catch(Exception ex)
             {
+                Brio.Log.Warning(ex, $"FlashBang: dropped a {op.Type} from {peer.Name}.");
                 continue;
             }
 
-            if(!SyncValidation.IsValid(dto))
+            if(value is null)
                 continue;
 
-            if(_remote.TryGetValue(key, out var item))
+            if(existing is null)
             {
-                item.Dto = dto;
-                item.Territory = op.Territory;
-                item.Dirty = true;
+                var theirs = _remote.Values.Where(i => i.Owner == peer).ToList();
+                if(theirs.Count >= SyncLimits.MaxItemsPerPlayer || theirs.Count(i => i.Kind == kind) >= kind.MaxPerPlayer)
+                    continue;
+
+                _remote[key] = existing = new RemoteItem(peer, op.SyncId, kind);
             }
-            else if(_remote.Keys.Count(k => k.Owner == peer.Id) < SyncLimits.MaxItemsPerPlayer)
-            {
-                _remote[key] = new RemoteItem(peer, dto, op.Territory);
-            }
+
+            existing.Territory = op.Territory;
+            existing.Parts[op.Part] = value;
+            existing.Dirty.Add(op.Part);
         }
     }
 
     private void ReconcileRemote()
     {
+        var now = DateTime.UtcNow;
+
         foreach(var item in _remote.Values)
         {
-            if(item.Entity is not null && !IsAlive(item.Entity))
+            var kind = item.Kind;
+
+            // Deleted on our side (or the game dropped it). It comes back on the next pass.
+            if(item.Entity is not null && !SafeIsAlive(item))
                 ForgetEntity(item);
 
-            var canShow = _gPoseService.IsGPosing && item.Territory == _clientState.TerritoryType;
+            if(item.Spawning && now - item.SpawnStarted > SpawnTimeout)
+            {
+                Brio.Log.Warning($"FlashBang: a {kind.Type} from {item.Owner.Name} took too long to appear.");
+                HideItem(item);
+                item.NextAttempt = now + RetryDelay;
+            }
+
+            var canShow = _gPoseService.IsGPosing
+                && (!kind.NeedsSameTerritory || item.Territory == _clientState.TerritoryType)
+                && kind.CanShow(item);
 
             if(!canShow)
             {
-                if(item.Entity is not null)
-                    DespawnRemote(item);
+                if(item.Entity is not null || item.Spawning)
+                    HideItem(item);
                 continue;
             }
 
             if(item.Entity is null)
             {
-                if(!item.Spawning)
-                    SpawnRemote(item);
+                if(!item.Spawning && now >= item.NextAttempt)
+                {
+                    item.Spawning = true;
+                    item.SpawnStarted = now;
+                    try
+                    {
+                        kind.Show(item, EnsurePeerFolder(item.Owner));
+                    }
+                    catch(Exception ex)
+                    {
+                        Brio.Log.Warning(ex, $"FlashBang: couldn't show a {kind.Type} from {item.Owner.Name}.");
+                        HideItem(item);
+                        item.NextAttempt = now + RetryDelay;
+                    }
+                }
             }
-            else if(item.Dirty)
+            else if(item.Dirty.Count > 0 && !item.Busy)
             {
-                ApplyToLight(item.Entity, item.Dto);
-                item.Dirty = false;
+                try
+                {
+                    kind.Apply(item);
+                }
+                catch(Exception ex)
+                {
+                    Brio.Log.Warning(ex, $"FlashBang: couldn't update a {kind.Type} from {item.Owner.Name}.");
+                    item.Dirty.Clear();
+                }
             }
         }
     }
 
-    private void SpawnRemote(RemoteItem item)
-    {
-        item.Spawning = true;
-        item.Dirty = false;
-        var folder = EnsurePeerFolder(item.Owner);
+    private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
 
-        _lightingService.SpawnFromDTO(item.Dto, null, folder, entity =>
+    private bool SafeIsAlive(RemoteItem item)
+    {
+        try
         {
-            item.Spawning = false;
-
-            // The item was removed or its owner left while it was spawning.
-            if(!_remote.ContainsValue(item))
-            {
-                _lightingService.Destroy(entity.GameLight);
-                return;
-            }
-
-            item.Entity = entity;
-            _remoteEntityIds.Add(entity.Id);
-            entity.IsSynced = true;
-            entity.GameLight.SetVisibility(item.Dto.IsVisible);
-
-            if(item.Dirty)
-            {
-                ApplyToLight(entity, item.Dto);
-                item.Dirty = false;
-            }
-        });
+            return item.Kind.IsAlive(item);
+        }
+        catch(Exception)
+        {
+            return false;
+        }
     }
 
-    private void DespawnRemote(RemoteItem item)
+    // Takes the item out of our scene but keeps its data, so it can be shown again.
+    private void HideItem(RemoteItem item)
     {
-        var entity = item.Entity;
+        item.Generation++;
+        item.Spawning = false;
+        item.Busy = false;
+
+        if(item.Entity is not null && SafeIsAlive(item))
+        {
+            try
+            {
+                item.Kind.Hide(item);
+            }
+            catch(Exception ex)
+            {
+                Brio.Log.Warning(ex, $"FlashBang: couldn't remove a {item.Kind.Type} from {item.Owner.Name}.");
+            }
+        }
+
         ForgetEntity(item);
-
-        if(entity is not null && IsAlive(entity))
-            _lightingService.Destroy(entity.GameLight);
     }
 
-    private void ForgetEntity(RemoteItem item)
+    private void RemoveItem(RemoteItem item)
     {
-        if(item.Entity is not null)
-            _remoteEntityIds.Remove(item.Entity.Id);
-        item.Entity = null;
-        item.Dirty = true;
+        HideItem(item);
+        item.Removed = true;
     }
 
-    private bool IsAlive(LightEntity entity)
-        => entity.GameLight.IsValid && _entityManager.EntityExists(entity.Id);
+    private static void ForgetEntity(RemoteItem item)
+    {
+        item.Entity = null;
+        item.State = null;
+        item.MarkAllDirty();
+    }
 
     private FolderEntity EnsurePeerFolder(SyncPeer peer)
     {
@@ -537,134 +601,135 @@ public class SceneSyncService : MediatorSubscriberBase
         return peer.Folder;
     }
 
-    private static unsafe void ApplyToLight(LightEntity entity, LightDTO dto)
-    {
-        if(!entity.GameLight.IsValid)
-            return;
-
-        if(entity.TryGetCapability<LightTransformCapability>(out var transform))
-            transform.Transform = dto.Transform;
-
-        var gameLight = entity.GameLight.GameLight;
-        var render = gameLight->RenderLight;
-        if(render != null)
-        {
-            render->EmissionType = dto.LightType;
-            render->Color = dto.Color;
-            render->Intensity = dto.Intensity;
-            render->Range = dto.Range;
-            render->FalloffFactor = dto.Falloff;
-            render->SpotLightAngleDegrees = dto.LightAngle;
-            render->AngularFalloffDegrees = dto.FalloffAngle;
-            render->CharacterShadowRange = dto.CharacterShadowRange;
-            render->ShadowPlaneNear = dto.ShadowPlaneNear;
-            render->ShadowPlaneFar = dto.ShadowPlaneFar;
-        }
-
-        entity.GameLight.SetVisibility(dto.IsVisible);
-        entity.RawName = dto.FriendlyName;
-
-        gameLight->Update();
-        gameLight->UpdateTransforms(false);
-    }
-
     // Outbound
 
-    private void SendChanges()
+    private bool AnyLinked => _peers.Any(p => p.Linked);
+
+    // Reads everything we share and queues whatever changed.
+    private void CaptureOwned()
     {
-        if(_client is null || !_peers.Any(p => p.Linked))
+        var folder = FindSyncFolder();
+        var seen = new HashSet<EntityId>();
+
+        if(folder is not null && _gPoseService.IsGPosing)
+        {
+            var now = DateTime.UtcNow;
+            var remoteIds = _remote.Values.Where(i => i.Entity is not null).Select(i => i.Entity!.Id).ToHashSet();
+            var counts = new Dictionary<SyncKind, int>();
+            var territory = _clientState.TerritoryType;
+
+            foreach(var entity in Descendants(folder))
+            {
+                if(remoteIds.Contains(entity.Id))
+                    continue;
+
+                var kind = Kinds.FirstOrDefault(k => SafeCanShare(k, entity));
+                if(kind is null)
+                    continue;
+
+                counts.TryGetValue(kind, out var count);
+                if(count >= kind.MaxPerPlayer || seen.Count >= SyncLimits.MaxItemsPerPlayer)
+                    continue;
+                counts[kind] = count + 1;
+
+                if(!_owned.TryGetValue(entity.Id, out var owned) || owned.Kind != kind)
+                {
+                    if(owned is not null)
+                        QueueRemove(owned);
+                    _owned[entity.Id] = owned = new OwnedItem(kind);
+                }
+
+                seen.Add(entity.Id);
+
+                for(byte part = 0; part < kind.PartCount; part++)
+                    CapturePart(entity, owned, part, territory, now);
+            }
+        }
+
+        foreach(var (entityId, owned) in _owned.Where(kv => !seen.Contains(kv.Key)).ToList())
+        {
+            _owned.Remove(entityId);
+            QueueRemove(owned);
+        }
+    }
+
+    private void CapturePart(Entity entity, OwnedItem owned, byte part, uint territory, DateTime now)
+    {
+        var state = owned.Parts[part];
+        if(now < state.NextCapture && state.Territory == territory)
             return;
 
-        var current = CaptureOwned();
-        var ops = new List<SyncOp>();
+        state.NextCapture = now + owned.Kind.CaptureInterval(part);
 
-        foreach(var (id, payload) in current)
+        byte[] bytes;
+        try
         {
-            var encoded = Convert.ToBase64String(payload);
-            if(_lastSent.TryGetValue(id, out var previous) && previous == encoded)
-                continue;
-
-            _lastSent[id] = encoded;
-            ops.Add(new SyncOp { Kind = SyncOpKind.Upsert, SyncId = id, Type = SyncEntityType.Light, Territory = _clientState.TerritoryType, Payload = payload });
+            var value = owned.Kind.Capture(entity, part);
+            if(value is null)
+                return;
+            bytes = owned.Kind.Encode(part, value);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't read {entity.FriendlyName} to share it.");
+            return;
         }
 
-        foreach(var id in _lastSent.Keys.Where(id => !current.ContainsKey(id)).ToList())
+        if(bytes.Length > SyncReassembler.MaxPartBytes(owned.Kind.Type))
         {
-            _lastSent.Remove(id);
-            ops.Add(new SyncOp { Kind = SyncOpKind.Remove, SyncId = id, Type = SyncEntityType.Light });
+            if(!state.WarnedTooLarge)
+            {
+                state.WarnedTooLarge = true;
+                Brio.PopToast($"{entity.FriendlyName} is too large to share.", "FlashBang Sync", NotificationType.Warning);
+            }
+            return;
         }
 
-        Send(ops, null);
+        if(state.Bytes is not null && state.Territory == territory && state.Bytes.AsSpan().SequenceEqual(bytes))
+            return;
+
+        state.Bytes = bytes;
+        state.Territory = territory;
+        state.Revision++;
+
+        if(AnyLinked)
+            _outbox.Enqueue(SyncCodec.Split(owned.Id, owned.Kind.Type, part, territory, state.Revision, bytes), null);
+    }
+
+    private static bool SafeCanShare(SyncKind kind, Entity entity)
+    {
+        try
+        {
+            return kind.CanShare(entity);
+        }
+        catch(Exception)
+        {
+            return false;
+        }
+    }
+
+    private void QueueRemove(OwnedItem owned)
+    {
+        if(!AnyLinked || owned.Parts.All(p => p.Bytes is null))
+            return;
+
+        _outbox.Enqueue([new SyncOp { Kind = SyncOpKind.Remove, SyncId = owned.Id, Type = owned.Kind.Type }], null);
     }
 
     // Sends everything we currently share to one player who just agreed.
     private void SendSnapshot(SyncPeer peer)
     {
-        if(_client is null)
-            return;
+        CaptureOwned();
 
-        var ops = CaptureOwned()
-            .Select(kv => new SyncOp { Kind = SyncOpKind.Upsert, SyncId = kv.Key, Type = SyncEntityType.Light, Territory = _clientState.TerritoryType, Payload = kv.Value })
-            .ToList();
-
-        Send(ops, peer.Id);
-    }
-
-    private void Send(List<SyncOp> ops, string? to)
-    {
-        if(_client is null || ops.Count == 0)
-            return;
-
-        foreach(var chunk in ops.Chunk(SyncLimits.MaxOpsPerBatch))
+        foreach(var owned in _owned.Values)
         {
-            var batch = new SyncBatch { Ops = [.. chunk] };
-            var data = Convert.ToBase64String(MessagePackSerializer.Serialize(batch));
-            if(data.Length > SyncLimits.MaxBatchBase64Chars)
+            for(byte part = 0; part < owned.Parts.Length; part++)
             {
-                Brio.Log.Warning("FlashBang: an update was too large to send and was skipped.");
-                continue;
+                var state = owned.Parts[part];
+                if(state.Bytes is not null)
+                    _outbox.Enqueue(SyncCodec.Split(owned.Id, owned.Kind.Type, part, state.Territory, state.Revision, state.Bytes), peer.Id);
             }
-            _ = _client.SendOpAsync(data, to);
         }
-    }
-
-    // Lights in our Sync folder that we own, as (stable id -> serialized LightDTO).
-    private Dictionary<Guid, byte[]> CaptureOwned()
-    {
-        var result = new Dictionary<Guid, byte[]>();
-        var folder = FindSyncFolder();
-        if(folder is null || !_gPoseService.IsGPosing)
-        {
-            _ownedIds.Clear();
-            return result;
-        }
-
-        var seen = new HashSet<EntityId>();
-        foreach(var light in Descendants(folder).OfType<LightEntity>())
-        {
-            if(_remoteEntityIds.Contains(light.Id) || !light.GameLight.IsValid || light.GameLight.IsWorldLight || light.GameLight.IsGPoseLight)
-                continue;
-            if(result.Count >= SyncLimits.MaxItemsPerPlayer)
-                break;
-
-            var dto = _lightingService.SaveLightDTO(light.GameLight, Vector3.Zero);
-            if(dto is null)
-                continue;
-
-            dto.FriendlyName = light.RawName;
-            dto.IsVisible = light.GameLight.IsVisible;
-
-            if(!_ownedIds.TryGetValue(light.Id, out var id))
-                _ownedIds[light.Id] = id = Guid.NewGuid();
-
-            seen.Add(light.Id);
-            result[id] = MessagePackSerializer.Serialize(dto);
-        }
-
-        foreach(var stale in _ownedIds.Keys.Where(k => !seen.Contains(k)).ToList())
-            _ownedIds.Remove(stale);
-
-        return result;
     }
 
     private static IEnumerable<Entity> Descendants(Entity root)
@@ -683,13 +748,19 @@ public class SceneSyncService : MediatorSubscriberBase
         base.Dispose();
     }
 
-    private class RemoteItem(SyncPeer owner, LightDTO dto, uint territory)
+    private class OwnedItem(SyncKind kind)
     {
-        public SyncPeer Owner { get; } = owner;
-        public LightDTO Dto { get; set; } = dto;
-        public uint Territory { get; set; } = territory;
-        public LightEntity? Entity { get; set; }
-        public bool Spawning { get; set; }
-        public bool Dirty { get; set; }
+        public Guid Id { get; } = Guid.NewGuid();
+        public SyncKind Kind { get; } = kind;
+        public PartState[] Parts { get; } = Enumerable.Range(0, kind.PartCount).Select(_ => new PartState()).ToArray();
+    }
+
+    private class PartState
+    {
+        public byte[]? Bytes { get; set; }
+        public uint Revision { get; set; }
+        public uint Territory { get; set; }
+        public DateTime NextCapture { get; set; }
+        public bool WarnedTooLarge { get; set; }
     }
 }
