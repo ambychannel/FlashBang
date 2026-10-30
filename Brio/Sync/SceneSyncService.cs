@@ -61,6 +61,7 @@ public class SceneSyncService : MediatorSubscriberBase
 
     private List<SyncKind>? _kinds;
     private List<SyncKind> Kinds => _kinds ??= [
+        ActivatorUtilities.CreateInstance<ActorSyncKind>(_serviceProvider),
         ActivatorUtilities.CreateInstance<LightSyncKind>(_serviceProvider),
     ];
 
