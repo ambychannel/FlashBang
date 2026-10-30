@@ -76,7 +76,8 @@ public static class SyncLimits
 
     public static readonly TimeSpan SendInterval = TimeSpan.FromMilliseconds(100);
 
-    // The relay allows 30 messages a second with a burst of 60; stay well under it.
-    public const double MessagesPerSecond = 20;
-    public const double MessageBurst = 30;
+    // The relay allows 30 messages a second with a burst of 60; stay under it. Scene updates and
+    // file transfers share this.
+    public const double MessagesPerSecond = 25;
+    public const double MessageBurst = 40;
 }

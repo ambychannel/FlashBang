@@ -12,6 +12,7 @@ using Brio.Game.Core;
 using Brio.Game.Posing;
 using Brio.Game.Types;
 using Brio.IPC;
+using Brio.Sync.Mods;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using System;
@@ -19,29 +20,44 @@ using System.Threading.Tasks;
 
 namespace Brio.Sync.Kinds;
 
-// Actors are sent as two parts: appearance (part 0, checked every couple of seconds) and pose
-// (part 1, at most twice a second), so posing doesn't resend the whole character.
+// Actors are sent as three parts: appearance (part 0, checked every couple of seconds), pose
+// (part 1, at most twice a second) and the list of mod files they use (part 2), so posing
+// doesn't resend the whole character. Mod files themselves go through SyncModTransfer.
 public class ActorSyncKind(
     EntityManager entityManager,
     IFramework framework,
     GlamourerService glamourerService,
     ActorRedrawService redrawService,
-    PosingService posingService) : SyncKind
+    PosingService posingService,
+    SyncModSource modSource,
+    SyncModTransfer modTransfer,
+    SyncModApplier modApplier) : SyncKind
 {
     private const byte AppearancePart = 0;
     private const byte PosePart = 1;
+    private const byte ModsPart = 2;
+
+    private static readonly TimeSpan ModCheckInterval = TimeSpan.FromMilliseconds(500);
 
     public override SyncEntityType Type => SyncEntityType.Actor;
     public override int MaxPerPlayer => SyncLimits.MaxActorsPerPlayer;
-    public override byte PartCount => 2;
+    public override byte PartCount => 3;
 
-    public override TimeSpan CaptureInterval(byte part)
-        => part == AppearancePart ? TimeSpan.FromSeconds(2) : TimeSpan.FromMilliseconds(500);
+    public override TimeSpan CaptureInterval(byte part) => part switch
+    {
+        AppearancePart => TimeSpan.FromSeconds(2),
+        PosePart => TimeSpan.FromMilliseconds(500),
+        _ => TimeSpan.FromSeconds(5),
+    };
 
     private class SpawnedState(bool hasAttachments)
     {
         public bool HasAttachments { get; } = hasAttachments;
         public CompanionContainer Companion { get; set; } = CompanionContainer.None;
+
+        public SyncModApplier.Applied? Mods { get; set; }
+        public SyncActorMods? ModsShown { get; set; }
+        public DateTime NextModCheck { get; set; }
     }
 
     // Ours
@@ -55,7 +71,12 @@ public class ActorSyncKind(
     public override object? Capture(Entity entity, byte part)
     {
         var actor = (ActorEntity)entity;
-        return part == AppearancePart ? CaptureAppearance(actor) : CapturePose(actor);
+        return part switch
+        {
+            AppearancePart => CaptureAppearance(actor),
+            PosePart => CapturePose(actor),
+            _ => modSource.Get(actor),
+        };
     }
 
     private static unsafe SyncActorAppearance CaptureAppearance(ActorEntity actor)
@@ -100,13 +121,23 @@ public class ActorSyncKind(
         return dto;
     }
 
-    public override byte[] Encode(byte part, object value)
-        => part == AppearancePart ? SyncCodec.Encode((SyncActorAppearance)value) : SyncCodec.Encode((SyncActorPose)value);
+    public override byte[] Encode(byte part, object value) => part switch
+    {
+        AppearancePart => SyncCodec.Encode((SyncActorAppearance)value),
+        PosePart => SyncCodec.Encode((SyncActorPose)value),
+        _ => SyncCodec.Encode((SyncActorMods)value),
+    };
 
     // Theirs
 
     public override object? Decode(byte part, byte[] compressed)
     {
+        if(part == ModsPart)
+        {
+            var mods = SyncCodec.Decode<SyncActorMods>(compressed, SyncLimits.MaxPartBytes * 4);
+            return mods is not null && SyncValidation.IsValid(mods) ? mods : null;
+        }
+
         if(part == AppearancePart)
         {
             var appearance = SyncCodec.Decode<SyncActorAppearance>(compressed, SyncLimits.MaxPartBytes);
@@ -197,6 +228,66 @@ public class ActorSyncKind(
 
         if(item.Dirty.Remove(PosePart) && item.Parts.TryGetValue(PosePart, out var poseValue))
             ApplyPose(entity, (SyncActorPose)poseValue);
+
+        if(item.Dirty.Remove(ModsPart) && item.Parts.TryGetValue(ModsPart, out var modsValue))
+            UpdateMods(item, entity, state, (SyncActorMods)modsValue);
+    }
+
+    // Fetches whatever files are missing, then swaps the actor over to the owner's mods. Until
+    // then it keeps its Glamourer look and shows download progress.
+    private void UpdateMods(RemoteItem item, ActorEntity entity, SpawnedState state, SyncActorMods mods)
+    {
+        if(ReferenceEquals(mods, state.ModsShown) || !modApplier.IsAvailable)
+            return;
+
+        if(DateTime.UtcNow < state.NextModCheck)
+        {
+            item.Dirty.Add(ModsPart);
+            return;
+        }
+        state.NextModCheck = DateTime.UtcNow + ModCheckInterval;
+
+        var progress = modTransfer.Want(item.Owner.Id, mods);
+        if(!progress.Done)
+        {
+            entity.IsLoading = true;
+            entity.LoadingDescription = $"Downloading look {progress.HaveBytes / 1048576}/{Math.Max(1, progress.TotalBytes / 1048576)} MB";
+            item.Dirty.Add(ModsPart);
+            return;
+        }
+
+        if(progress.FailedFiles > 0)
+            Brio.Log.Warning($"FlashBang: {progress.FailedFiles} mod files for {entity.FriendlyName} couldn't be downloaded; showing the rest.");
+
+        entity.IsLoading = true;
+        entity.LoadingDescription = "Applying look...";
+        item.Busy = true;
+
+        var generation = item.Generation;
+        var glamourerState = item.Parts.TryGetValue(AppearancePart, out var appearance) ? ((SyncActorAppearance)appearance).GlamourerState : null;
+
+        _ = modApplier.Apply(entity, mods, glamourerState, state.Mods).ContinueWith(task => framework.RunOnFrameworkThread(() =>
+        {
+            if(task.Exception is not null)
+                Brio.Log.Warning(task.Exception, $"FlashBang: couldn't apply the mods on {entity.FriendlyName}.");
+
+            var applied = task.IsCompletedSuccessfully ? task.Result : state.Mods;
+            if(!item.IsCurrent(generation))
+            {
+                // Hidden while applying; don't leave the collection behind.
+                if(applied is not null && applied != state.Mods)
+                    modApplier.Remove(null, applied);
+                return;
+            }
+
+            state.Mods = applied;
+            state.ModsShown = mods;
+            entity.IsLoading = false;
+            item.Busy = false;
+
+            // A redraw resets the skeleton.
+            item.Dirty.Add(PosePart);
+        }));
     }
 
     private async Task ApplyAppearance(ActorEntity entity, SyncActorAppearance dto, SpawnedState state)
@@ -260,10 +351,20 @@ public class ActorSyncKind(
     private void Respawn(RemoteItem item)
     {
         Hide(item);
+        Release(item);
         item.Generation++;
         item.Entity = null;
         item.State = null;
         item.MarkAllDirty();
+    }
+
+    public override void Release(RemoteItem item)
+    {
+        if(item.State is SpawnedState { Mods: { } applied } state)
+        {
+            modApplier.Remove(item.Entity as ActorEntity, applied);
+            state.Mods = null;
+        }
     }
 
     public override void Hide(RemoteItem item)

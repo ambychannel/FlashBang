@@ -6,6 +6,7 @@ using Brio.Game.GPose;
 using Brio.Services;
 using Brio.Services.MediatorMessages;
 using Brio.Sync.Kinds;
+using Brio.Sync.Mods;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Plugin.Services;
 using MessagePack;
@@ -54,6 +55,10 @@ public class SceneSyncService : MediatorSubscriberBase
     private readonly IFramework _framework;
     private readonly ConfigurationService _configurationService;
     private readonly IServiceProvider _serviceProvider;
+    private readonly SyncModTransfer _modTransfer;
+    private readonly SyncModSource _modSource;
+    private readonly SyncModCache _modCache;
+    private DateTime _nextCacheTrim = DateTime.MinValue;
 
     private SyncRelayClient? _client;
     private readonly List<SyncPeer> _peers = [];
@@ -97,8 +102,14 @@ public class SceneSyncService : MediatorSubscriberBase
         IObjectTable objectTable,
         IFramework framework,
         ConfigurationService configurationService,
-        IServiceProvider serviceProvider) : base(mediator)
+        IServiceProvider serviceProvider,
+        SyncModTransfer modTransfer,
+        SyncModSource modSource,
+        SyncModCache modCache) : base(mediator)
     {
+        _modTransfer = modTransfer;
+        _modSource = modSource;
+        _modCache = modCache;
         _entityManager = entityManager;
         _gPoseService = gPoseService;
         _clientState = clientState;
@@ -162,6 +173,7 @@ public class SceneSyncService : MediatorSubscriberBase
     {
         var client = new SyncRelayClient();
         _client = client;
+        _modTransfer.Attach(client);
         RoomCode = code;
         var relay = RelayUrl;
         var name = _objectTable.LocalPlayer?.Name.TextValue ?? "Player";
@@ -228,6 +240,7 @@ public class SceneSyncService : MediatorSubscriberBase
     {
         var client = _client;
         _client = null;
+        _modTransfer.Detach();
         if(client is not null)
             Task.Run(() => client.Dispose());
 
@@ -262,10 +275,40 @@ public class SceneSyncService : MediatorSubscriberBase
 
         if(_client is not null && Status == SyncStatus.Connected)
         {
-            foreach(var (data, to) in _outbox.Take())
+            foreach(var (data, to) in _outbox.Take(_client.Limiter))
                 _ = _client.SendOpAsync(data, to);
         }
+
+        if(Status == SyncStatus.Connected)
+            _modTransfer.Tick();
+
+        if(DateTime.UtcNow >= _nextCacheTrim)
+        {
+            _nextCacheTrim = DateTime.UtcNow + TimeSpan.FromMinutes(1);
+            _modCache.Trim(ModFilesInUse());
+        }
     }
+
+    private void UpdateLinked() => _modTransfer.SetLinked(_peers.Where(p => p.Linked).Select(p => p.Id));
+
+    // Mod files other players' actors use, plus anything still downloading.
+    private HashSet<string> ModFilesInUse()
+    {
+        var inUse = _modTransfer.InUse();
+        foreach(var item in _remote.Values)
+        {
+            foreach(var part in item.Parts.Values)
+            {
+                if(part is SyncActorMods mods)
+                    inUse.UnionWith(mods.Files.Select(f => f.Hash));
+            }
+        }
+        return inUse;
+    }
+
+    public long DownloadedModBytes => _modCache.TotalBytes;
+
+    public void ClearDownloadedMods() => _modCache.Clear(ModFilesInUse());
 
     // Relay messages
 
@@ -292,6 +335,7 @@ public class SceneSyncService : MediatorSubscriberBase
                         {
                             DropPeer(peer);
                             _peers.Remove(peer);
+                            UpdateLinked();
                             Brio.PopToast($"{peer.Name} left the room.", "FlashBang Sync", NotificationType.Info);
                         }
                         break;
@@ -315,6 +359,7 @@ public class SceneSyncService : MediatorSubscriberBase
                         if(peer is null)
                             break;
                         peer.Linked = true;
+                        UpdateLinked();
                         SendSnapshot(peer);
                         Brio.PopToast($"Now syncing with {peer.Name}.", "FlashBang Sync", NotificationType.Success);
                         break;
@@ -326,6 +371,7 @@ public class SceneSyncService : MediatorSubscriberBase
                             break;
                         DropPeer(peer);
                         peer.Linked = false;
+                        UpdateLinked();
                         break;
                     }
                 case "op":
@@ -597,6 +643,15 @@ public class SceneSyncService : MediatorSubscriberBase
 
     private static void ForgetEntity(RemoteItem item)
     {
+        try
+        {
+            item.Kind.Release(item);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't clean up a {item.Kind.Type} from {item.Owner.Name}.");
+        }
+
         item.Entity = null;
         item.State = null;
         item.MarkAllDirty();
@@ -668,6 +723,8 @@ public class SceneSyncService : MediatorSubscriberBase
             _owned.Remove(entityId);
             QueueRemove(owned);
         }
+
+        _modSource.Keep(seen);
     }
 
     private void CapturePart(Entity entity, OwnedItem owned, byte part, uint territory, DateTime now)

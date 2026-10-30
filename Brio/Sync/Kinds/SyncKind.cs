@@ -40,6 +40,10 @@ public abstract class SyncKind
     public abstract void Show(RemoteItem item, FolderEntity folder);
     public abstract void Apply(RemoteItem item);
     public abstract void Hide(RemoteItem item);
+
+    // Called whenever our copy of an item goes away (hidden, deleted, or the game dropped it), to
+    // let go of anything kept for it outside the scene.
+    public virtual void Release(RemoteItem item) { }
     public abstract bool IsAlive(RemoteItem item);
 }
 

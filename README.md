@@ -25,13 +25,14 @@ Open FlashBang with `/flashbang`.
 | 1 | Sync folder, room codes, lights | Done |
 | 2 | "Agree to sync" prompt, leave room, safety limits | Done |
 | 3 | Actors (look, pose, minion or mount), props, furniture, world objects, VFX, cameras, reference images | Needs testing in game |
-| 4 | Weather and time | Planned |
+| 4 | Synced actors use their creator's mods (peer-to-peer file transfer, Penumbra, Customize+) | Needs testing in game |
+| 5 | Weather and time | Planned |
 
 ## Works with Lightless
 
 FlashBang keeps Brio's IPC, so Lightless (including GPose Together) keeps working with it. Lightless still handles everyone's modded appearance; FlashBang handles the scene.
 
-Actors you sync are sent with their Glamourer state (or their Brio appearance if the other player doesn't have Glamourer), not their mods. Penumbra collections and Customize+ profiles only exist on your PC, so a synced actor shows up without them.
+Actors you sync bring your mods with them. FlashBang lists the mod files Penumbra uses for the actor on your PC, and the other player downloads the ones they don't already have straight from you through the relay. Nothing is stored on a server. Until the download finishes they see the actor's Glamourer look. Downloaded files are kept (up to 10 GB) in FlashBang's `cache` folder, and you can clear them from the Sync window.
 
 ## Credits and license
 

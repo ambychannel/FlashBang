@@ -14,8 +14,6 @@ public class SyncOutbox
 
     private readonly LinkedList<Entry> _live = [];
     private readonly LinkedList<Entry> _bulk = [];
-    private double _tokens = SyncLimits.MessageBurst;
-    private DateTime _lastRefill = DateTime.UtcNow;
 
     public int Waiting => _live.Count + _bulk.Count;
 
@@ -56,15 +54,11 @@ public class SyncOutbox
     }
 
     // Packs queued ops into relay messages, as many as the rate allows right now.
-    public List<(string Data, string? To)> Take()
+    public List<(string Data, string? To)> Take(SyncRateLimiter limiter)
     {
-        var now = DateTime.UtcNow;
-        _tokens = Math.Min(SyncLimits.MessageBurst, _tokens + (now - _lastRefill).TotalSeconds * SyncLimits.MessagesPerSecond);
-        _lastRefill = now;
-
         var messages = new List<(string, string?)>();
 
-        while(_tokens >= 1 && (_live.Count > 0 || _bulk.Count > 0))
+        while((_live.Count > 0 || _bulk.Count > 0) && limiter.TryTake())
         {
             var queue = _live.Count > 0 ? _live : _bulk;
             var to = queue.First!.Value.To;
@@ -90,7 +84,6 @@ public class SyncOutbox
             }
 
             messages.Add((data, to));
-            _tokens -= 1;
         }
 
         return messages;

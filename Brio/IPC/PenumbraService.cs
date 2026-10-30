@@ -88,6 +88,7 @@ public class PenumbraService : BrioIPC
     private readonly ResolvePlayerPathsAsync _penumbraResolvePaths;
     private readonly GetGameObjectResourcePaths _penumbraResourcePaths;
     private readonly GetPlayerMetaManipulations _penumbraGetMetaManipulations;
+    private readonly GetMetaManipulations _penumbraGetObjectMetaManipulations;
     //private readonly ConvertTextureFile _penumbraConvertTextureFile;
 
     public PenumbraService(IDalamudPluginInterface pluginInterface, IFramework framework, ConfigurationService configurationService)
@@ -119,6 +120,7 @@ public class PenumbraService : BrioIPC
         _penumbraResolvePaths = new ResolvePlayerPathsAsync(_pluginInterface);
         _penumbraResourcePaths = new GetGameObjectResourcePaths(_pluginInterface);
         _penumbraGetMetaManipulations = new GetPlayerMetaManipulations(_pluginInterface);
+        _penumbraGetObjectMetaManipulations = new GetMetaManipulations(_pluginInterface);
         //_penumbraConvertTextureFile = new ConvertTextureFile(_pluginInterface);
 
         _configurationService.OnConfigurationChanged += OnConfigurationChanged;
@@ -229,6 +231,14 @@ public class PenumbraService : BrioIPC
         Brio.Log.Debug("Calling On IPC: Penumbra.GetMetaManipulations");
 
         return _penumbraGetMetaManipulations.Invoke();
+    }
+
+    // Meta changes (heights, visors, shapes...) applying to one object, from its own collection.
+    public string GetMetaManipulations(int objectIndex)
+    {
+        if(IsAvailable == false) return string.Empty;
+
+        return _penumbraGetObjectMetaManipulations.Invoke(objectIndex);
     }
 
     public async Task RemoveTemporaryCollectionAsync(Guid applicationId, Guid collId)

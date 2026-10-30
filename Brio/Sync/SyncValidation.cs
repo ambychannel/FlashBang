@@ -7,6 +7,7 @@ using Brio.Game.WorldObjects;
 using Brio.Services.Models;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 
 namespace Brio.Sync;
@@ -113,6 +114,50 @@ public static class SyncValidation
             return ".jpg";
         return null;
     }
+
+    public static bool IsValid(Mods.SyncActorMods dto)
+    {
+        if(dto.Files is null || dto.Swaps is null || dto.Meta is null)
+            return false;
+
+        if(dto.Files.Count > Mods.SyncModLimits.MaxFiles || dto.Swaps.Count > Mods.SyncModLimits.MaxFiles
+            || dto.Meta.Length > Mods.SyncModLimits.MaxMetaLength || (dto.CustomizePlus?.Length ?? 0) > Mods.SyncModLimits.MaxCustomizePlusLength)
+            return false;
+
+        long total = 0;
+        foreach(var file in dto.Files)
+        {
+            if(!IsHash(file.Hash) || file.Size <= 0 || file.Size > Mods.SyncModLimits.MaxFileBytes)
+                return false;
+            if(file.GamePaths is null || file.GamePaths.Count == 0 || file.GamePaths.Count > Mods.SyncModLimits.MaxGamePathsPerFile)
+                return false;
+            foreach(var path in file.GamePaths)
+            {
+                if(!IsModGamePath(path))
+                    return false;
+            }
+            total += file.Size;
+        }
+
+        if(total > Mods.SyncModLimits.MaxActorBytes)
+            return false;
+
+        foreach(var swap in dto.Swaps)
+        {
+            if(!IsModGamePath(swap.GamePath) || !IsModGamePath(swap.SwapPath))
+                return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsHash(string? hash)
+        => hash is { Length: 64 } && hash.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    // A lowercase game path with a file type mods are allowed to replace.
+    public static bool IsModGamePath(string? path)
+        => IsGamePath(path) && path == path.ToLowerInvariant()
+        && Mods.SyncModLimits.AllowedExtensions.Any(e => path.EndsWith(e, StringComparison.Ordinal));
 
     // A path inside the game's data, like "bgcommon/hou/indoor/.../asset.sgb". Never a file on disk.
     public static bool IsGamePath(string? path)

@@ -103,6 +103,8 @@ public class SyncWindow : Window, IDisposable
         ImGui.SameLine();
         if(ImBrio.Button("Join", FontAwesomeIcon.ArrowRight))
             _sync.JoinRoom(_joinCode);
+
+        DrawModCache();
     }
 
     private void DrawRoom()
@@ -117,7 +119,7 @@ public class SyncWindow : Window, IDisposable
             ImGui.SetClipboardText(code);
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Everything you put in the Sync folder (actors, lights, props, furniture, VFX, cameras and reference images) is shared with everyone you've agreed to sync with. Their things appear in the Sync folder too. Mods don't carry over, so modded looks show as their Glamourer or game appearance.");
+        ImGui.TextDisabled("Everything you put in the Sync folder (actors, lights, props, furniture, VFX, cameras and reference images) is shared with everyone you've agreed to sync with. Their things appear in the Sync folder too. Actors bring their owner's mods: the files download from them the first time, and the actor shows its plain look until the download finishes.");
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
@@ -170,6 +172,16 @@ public class SyncWindow : Window, IDisposable
 
         if(ImBrio.Button("Leave room", FontAwesomeIcon.DoorOpen))
             _sync.LeaveRoom();
+
+        DrawModCache();
+    }
+
+    private void DrawModCache()
+    {
+        ImGui.Spacing();
+        ImGui.TextDisabled($"Downloaded mods: {_sync.DownloadedModBytes / 1048576} MB (up to 10 GB is kept)");
+        if(ImBrio.Button("Clear downloaded mods", FontAwesomeIcon.Trash))
+            _sync.ClearDownloadedMods();
     }
 
     public void Dispose()

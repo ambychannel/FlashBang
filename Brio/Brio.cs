@@ -211,6 +211,10 @@ public class Brio(IDalamudPluginInterface pluginInterface) : IAsyncDalamudPlugin
         serviceCollection.AddSingleton<ReferenceImageService>();
         serviceCollection.AddSingleton<PathMetadataService>();
         serviceCollection.AddSingleton<QuickAccessService>();
+        serviceCollection.AddSingleton<Sync.Mods.SyncModCache>();
+        serviceCollection.AddSingleton<Sync.Mods.SyncModSource>();
+        serviceCollection.AddSingleton<Sync.Mods.SyncModTransfer>();
+        serviceCollection.AddSingleton<Sync.Mods.SyncModApplier>();
         serviceCollection.AddSingleton<SceneSyncService>();
 
         // API & Web
