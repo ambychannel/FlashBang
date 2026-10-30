@@ -12,9 +12,13 @@ const CODE_LENGTH = 12;
 
 const MAX_MEMBERS = 8;
 const MAX_MESSAGE_CHARS = 16 * 1024;
+const MAX_BINARY_BYTES = 256 * 1024;
+const MAX_BINARY_HEADER_BYTES = 256;
 const MAX_NAME_CHARS = 32;
 const RATE_PER_SECOND = 30;
 const RATE_BURST = 60;
+const BYTES_PER_SECOND = 8 * 1024 * 1024;
+const BYTES_BURST = 16 * 1024 * 1024;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
 
 export function normalizeCode(raw: string): string | null {
@@ -91,6 +95,7 @@ type ClientMessage =
 export class Room implements DurableObject {
   private consents = new Set<string>(); // "a>b" means a agreed to sync with b
   private buckets = new Map<string, { tokens: number; at: number }>();
+  private byteBuckets = new Map<string, { tokens: number; at: number }>();
 
   constructor(private ctx: DurableObjectState, private env: Env) {
     ctx.blockConcurrencyWhile(async () => {
@@ -136,7 +141,11 @@ export class Room implements DurableObject {
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     const me = ws.deserializeAttachment() as Member;
 
-    if (typeof raw !== "string" || raw.length > MAX_MESSAGE_CHARS) {
+    if (typeof raw !== "string") {
+      this.forwardBinary(ws, me, raw);
+      return;
+    }
+    if (raw.length > MAX_MESSAGE_CHARS) {
       send(ws, { t: "error", code: "too_large", message: "Message too large." });
       return;
     }
@@ -219,6 +228,7 @@ export class Room implements DurableObject {
       if (key.startsWith(`${me.id}>`) || key.endsWith(`>${me.id}`)) this.consents.delete(key);
     await this.saveConsents();
     this.buckets.delete(me.id);
+    this.byteBuckets.delete(me.id);
     this.broadcast({ t: "left", id: me.id }, me.id);
     await this.ctx.storage.setAlarm(Date.now() + ROOM_IDLE_MS);
   }
@@ -257,16 +267,78 @@ export class Room implements DurableObject {
     }
   }
 
-  private allow(id: string): boolean {
-    const now = Date.now();
-    const b = this.buckets.get(id) ?? { tokens: RATE_BURST, at: now };
-    b.tokens = Math.min(RATE_BURST, b.tokens + ((now - b.at) / 1000) * RATE_PER_SECOND);
-    b.at = now;
-    const ok = b.tokens >= 1;
-    if (ok) b.tokens -= 1;
-    this.buckets.set(id, b);
-    return ok;
+  // Binary frames carry bulk data (mod files) to one linked player. Layout, both ways:
+  // 2-byte big-endian header length, a JSON header, then the payload. The sender's header is
+  // {to}; the relay replaces it with {from} so nobody can pretend to be someone else.
+  private forwardBinary(ws: WebSocket, me: Member, raw: ArrayBuffer): void {
+    if (raw.byteLength > MAX_BINARY_BYTES + MAX_BINARY_HEADER_BYTES + 2) {
+      send(ws, { t: "error", code: "too_large", message: "Message too large." });
+      return;
+    }
+    if (!this.allow(me.id) || !this.allowBytes(me.id, raw.byteLength)) {
+      send(ws, { t: "error", code: "rate", message: "Sending too fast; some updates were dropped." });
+      return;
+    }
+
+    const bytes = new Uint8Array(raw);
+    if (bytes.length < 2) return;
+    const headerLength = (bytes[0] << 8) | bytes[1];
+    if (headerLength > MAX_BINARY_HEADER_BYTES || bytes.length < 2 + headerLength) return;
+
+    let header: { to?: unknown };
+    try {
+      header = JSON.parse(new TextDecoder().decode(bytes.subarray(2, 2 + headerLength)));
+    } catch {
+      return;
+    }
+
+    const to = header?.to;
+    if (typeof to !== "string" || to === me.id || !this.linked(me.id, to)) return;
+    const target = this.socketOf(to);
+    if (!target) return;
+
+    const payload = bytes.subarray(2 + headerLength);
+    if (payload.length > MAX_BINARY_BYTES) {
+      send(ws, { t: "error", code: "too_large", message: "Message too large." });
+      return;
+    }
+
+    const outHeader = new TextEncoder().encode(JSON.stringify({ from: me.id }));
+    const out = new Uint8Array(2 + outHeader.length + payload.length);
+    out[0] = outHeader.length >> 8;
+    out[1] = outHeader.length & 0xff;
+    out.set(outHeader, 2);
+    out.set(payload, 2 + outHeader.length);
+
+    try {
+      target.send(out);
+    } catch {}
   }
+
+  private allow(id: string): boolean {
+    return take(this.buckets, id, 1, RATE_PER_SECOND, RATE_BURST);
+  }
+
+  private allowBytes(id: string, count: number): boolean {
+    return take(this.byteBuckets, id, count, BYTES_PER_SECOND, BYTES_BURST);
+  }
+}
+
+function take(
+  buckets: Map<string, { tokens: number; at: number }>,
+  id: string,
+  cost: number,
+  perSecond: number,
+  burst: number,
+): boolean {
+  const now = Date.now();
+  const b = buckets.get(id) ?? { tokens: burst, at: now };
+  b.tokens = Math.min(burst, b.tokens + ((now - b.at) / 1000) * perSecond);
+  b.at = now;
+  const ok = b.tokens >= cost;
+  if (ok) b.tokens -= cost;
+  buckets.set(id, b);
+  return ok;
 }
 
 function sanitizeName(raw: string): string {
