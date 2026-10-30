@@ -59,3 +59,24 @@ public class SyncCamera
     public float FoV { get; set; }
     public bool DisableCollision { get; set; }
 }
+
+// A reference image's picture. Only the bytes travel, never the owner's file name or path.
+[Serializable]
+[MessagePackObject(keyAsPropertyName: true)]
+public class SyncReferenceImage
+{
+    public string Name { get; set; } = "";
+    public byte[] Image { get; set; } = [];
+}
+
+// How a reference image's window is set up. Sent separately so moving a slider doesn't resend the picture.
+[Serializable]
+[MessagePackObject(keyAsPropertyName: true)]
+public class SyncReferenceImageView
+{
+    public bool IsWindowOpen { get; set; } = true;
+    public float Opacity { get; set; } = 1f;
+    public float Zoom { get; set; } = 1f;
+    public float Rotation { get; set; }
+    public Vector2 PanOffset { get; set; }
+}

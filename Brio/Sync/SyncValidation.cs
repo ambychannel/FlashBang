@@ -95,6 +95,25 @@ public static class SyncValidation
         && IsFinite(dto.Angle.X, MaxValue) && IsFinite(dto.Angle.Y, MaxValue)
         && IsFinite(dto.PivotRotation, MaxValue) && IsFinite(dto.Zoom, MaxValue) && IsFinite(dto.FoV, MaxValue);
 
+    public static bool IsValid(SyncReferenceImage dto)
+        => (dto.Name?.Length ?? 0) <= MaxNameLength
+        && dto.Image is not null && dto.Image.Length <= SyncLimits.MaxImageBytes
+        && ImageExtension(dto.Image) is not null;
+
+    public static bool IsValid(SyncReferenceImageView dto)
+        => IsFinite(dto.Opacity, 1f) && IsFinite(dto.Zoom, 1000f) && IsFinite(dto.Rotation, MaxValue)
+        && IsFinite(dto.PanOffset.X, MaxValue) && IsFinite(dto.PanOffset.Y, MaxValue);
+
+    // ".png" or ".jpg" going by the first bytes, or null for anything else.
+    public static string? ImageExtension(ReadOnlySpan<byte> image)
+    {
+        if(image.StartsWith((ReadOnlySpan<byte>)[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+            return ".png";
+        if(image.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xD8, 0xFF]))
+            return ".jpg";
+        return null;
+    }
+
     // A path inside the game's data, like "bgcommon/hou/indoor/.../asset.sgb". Never a file on disk.
     public static bool IsGamePath(string? path)
     {
