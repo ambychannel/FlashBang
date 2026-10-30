@@ -63,6 +63,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private List<SyncKind> Kinds => _kinds ??= [
         ActivatorUtilities.CreateInstance<ActorSyncKind>(_serviceProvider),
         ActivatorUtilities.CreateInstance<LightSyncKind>(_serviceProvider),
+        ActivatorUtilities.CreateInstance<WorldObjectSyncKind>(_serviceProvider),
     ];
 
     // Items we own, by entity.

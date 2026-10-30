@@ -208,7 +208,7 @@ public unsafe class WorldObjectService : MediatorSubscriberBase
 
     //
 
-    public void SpawnFromDTO(WorldObjectDTO dto, Vector3? anchor = null, FolderEntity? folder = null)
+    public void SpawnFromDTO(WorldObjectDTO dto, Vector3? anchor = null, FolderEntity? folder = null, Action<WorldObjectEntity>? onSpawned = null)
     {
         var transform = dto.Transform;
         transform.Position = anchor.HasValue ? anchor.Value + dto.RelativePosition : dto.Transform.Position;
@@ -220,7 +220,7 @@ public unsafe class WorldObjectService : MediatorSubscriberBase
                 {
                     var worldObj = SpawnBgObjectInternal(dto.Path);
                     worldObj?.SetTransform(transform);
-                    MoveToFolder(worldObj, folder);
+                    MoveToFolder(worldObj, folder, onSpawned);
                 });
                 break;
             case WorldObjectType.StaticVfx:
@@ -232,7 +232,7 @@ public unsafe class WorldObjectService : MediatorSubscriberBase
                     if(dto.Color.HasValue)
                         worldObj?.VFX->Color = dto.Color.Value;
 
-                    MoveToFolder(worldObj, folder);
+                    MoveToFolder(worldObj, folder, onSpawned);
                 });
                 break;
             case WorldObjectType.Furniture:
@@ -253,7 +253,7 @@ public unsafe class WorldObjectService : MediatorSubscriberBase
                         1000,
                         dontStartFor: 1);
 
-                    MoveToFolder(worldObj, folder);
+                    MoveToFolder(worldObj, folder, onSpawned);
                 });
                 break;
             case WorldObjectType.Prop:
@@ -263,21 +263,24 @@ public unsafe class WorldObjectService : MediatorSubscriberBase
                 {
                     var worldObj = SpawnPropInternal(dto.PropModel.ToWeaponCreateInfo());
                     worldObj?.SetTransform(transform);
-                    MoveToFolder(worldObj, folder);
+                    MoveToFolder(worldObj, folder, onSpawned);
                 });
                 break;
         }
     }
 
-    private void MoveToFolder(IWorldObject? obj, FolderEntity? folder)
+    private void MoveToFolder(IWorldObject? obj, FolderEntity? folder, Action<WorldObjectEntity>? onSpawned = null)
     {
-        if(obj is null || folder is null)
+        if(obj is null)
             return;
 
         var entity = _worldObjectEntities.Components[obj.EntityIndex];
 
-        if(entity is not null)
+        if(entity is not null && folder is not null)
             _entityManager.MoveEntity(entity, folder);
+
+        if(entity is not null)
+            onSpawned?.Invoke(entity);
     }
 
     public void Clone(IWorldObject obj)

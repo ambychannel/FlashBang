@@ -1,5 +1,6 @@
 using Brio.Files;
 using Brio.Game.Types;
+using Brio.Services.Models;
 using MessagePack;
 using System;
 
@@ -25,4 +26,13 @@ public class SyncActorPose
 {
     public required PoseData Body { get; set; }
     public PoseData? Companion { get; set; }
+}
+
+// A prop, piece of furniture, world object or VFX.
+[Serializable]
+[MessagePackObject(keyAsPropertyName: true)]
+public class SyncWorldObject
+{
+    public required WorldObjectDTO Object { get; set; }
+    public bool IsVisible { get; set; } = true;
 }

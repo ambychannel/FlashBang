@@ -2,6 +2,7 @@ using Brio.Core;
 using Brio.Files;
 using Brio.Game.Types;
 using Brio.Game.World.Interop;
+using Brio.Game.WorldObjects;
 using Brio.Services.Models;
 using System;
 using System.Collections.Generic;
@@ -17,6 +18,7 @@ public static class SyncValidation
     private const int MaxNameLength = 64;
     private const int MaxBonesPerSkeleton = 1024;
     private const int MaxGlamourerStateLength = 64 * 1024;
+    private const int MaxPathLength = 256;
 
     public static bool IsValid(LightDTO dto)
     {
@@ -66,6 +68,36 @@ public static class SyncValidation
             && IsFinite(chara.HairGloss) && IsFinite(chara.HairHighlight)
             && IsFinite(chara.BustScale)
             && (!chara.MouthColor.HasValue || IsFinite(chara.MouthColor.Value, MaxValue));
+    }
+
+    public static bool IsValid(SyncWorldObject dto)
+    {
+        var obj = dto.Object;
+        if(obj is null || !Enum.IsDefined(obj.ObjectType) || (obj.FriendlyName?.Length ?? 0) > MaxNameLength || obj.StainID > byte.MaxValue)
+            return false;
+
+        if(obj.ObjectType == WorldObjectType.Prop ? obj.PropModel is null : !IsGamePath(obj.Path))
+            return false;
+
+        obj.ParentFolderId = null;
+
+        return IsValid(obj.Transform)
+            && (!obj.Color.HasValue || IsFinite(obj.Color.Value, MaxValue));
+    }
+
+    // A path inside the game's data, like "bgcommon/hou/indoor/.../asset.sgb". Never a file on disk.
+    public static bool IsGamePath(string? path)
+    {
+        if(string.IsNullOrEmpty(path) || path.Length > MaxPathLength || !path.Contains('/') || path.StartsWith('/') || path.Contains(".."))
+            return false;
+
+        foreach(var c in path)
+        {
+            if(!(char.IsAsciiLetterOrDigit(c) || c is '/' or '_' or '-' or '.'))
+                return false;
+        }
+
+        return true;
     }
 
     public static bool IsValid(SyncActorPose dto)
