@@ -115,7 +115,7 @@ public class EntityManagerWidget(EntitManagerCapability capability) : Widget<Ent
             {
                 if(popup.Success)
                 {
-                    foreach(var folder in Capability.Entity.Children.OfType<FolderEntity>().Where(f => f.IsEditable))
+                    foreach(var folder in Capability.Entity.Children.OfType<FolderEntity>().Where(f => f.AcceptsDrops))
                     {
                         if(ImGui.MenuItem($"{folder.FriendlyName}###manager_move_to_folder_{folder.Id}"))
                             Capability.MoveSelectedToFolder(folder);

@@ -320,7 +320,7 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
             ImGui.OpenPopup($"context_popup{entity.Id}");
         }
 
-        if(entity is FolderEntity folderEntity && folderEntity.IsEditable)
+        if(entity is FolderEntity folderEntity && folderEntity.AcceptsDrops)
         {
             if(ImGui.BeginDragDropTarget())
             {

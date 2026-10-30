@@ -21,6 +21,9 @@ public class FolderEntity : Entity
     public bool AreChildrenHidden { get; set; }
     public bool IsEditable { get; set; } = true;
 
+    // Whether things can be dragged or moved into this folder.
+    public virtual bool AcceptsDrops => IsEditable;
+
     public FolderEntity(string name, IServiceProvider serviceProvider) : base($"folder_{Guid.NewGuid():N}", serviceProvider)
     {
         FriendlyName = name;

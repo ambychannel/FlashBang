@@ -17,6 +17,9 @@ public class SyncFolderEntity : FolderEntity
     public override FontAwesomeIcon Icon => FontAwesomeIcon.Link;
     public override int ContextButtonCount => 2;
 
+    // Not renameable, but lights still have to be dropped in to be shared.
+    public override bool AcceptsDrops => true;
+
     public SyncFolderEntity(IServiceProvider serviceProvider) : base("Sync", serviceProvider)
     {
         IsEditable = false;
