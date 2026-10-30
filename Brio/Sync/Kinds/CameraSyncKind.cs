@@ -77,11 +77,7 @@ public class CameraSyncKind(VirtualCameraManager cameraManager, EntityManager en
 
         if((CameraType)item.State! != dto.Type)
         {
-            Hide(item);
-            item.Generation++;
-            item.Entity = null;
-            item.State = null;
-            item.MarkAllDirty();
+            item.RespawnRequested = true;
             return;
         }
 

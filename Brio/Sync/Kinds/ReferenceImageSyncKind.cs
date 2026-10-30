@@ -169,11 +169,7 @@ public class ReferenceImageSyncKind : SyncKind
         if(item.Dirty.Remove(ImagePart) && !ReferenceEquals(item.State, item.Parts[ImagePart]))
         {
             // A different picture; replace the window.
-            Hide(item);
-            item.Generation++;
-            item.Entity = null;
-            item.State = null;
-            item.MarkAllDirty();
+            item.RespawnRequested = true;
             return;
         }
 

@@ -80,6 +80,8 @@ public class SceneSyncService : MediatorSubscriberBase
     // Items other players own, keyed by (owner, id). Kept even when they can't be shown
     // (outside GPose, different zone) so they reappear when they can.
     private readonly Dictionary<(string Owner, Guid Id), RemoteItem> _remote = [];
+    private readonly Queue<RemoteItem> _despawns = new();
+    private readonly HashSet<FolderEntity> _orphanFolders = [];
 
     public SyncStatus Status { get; private set; } = SyncStatus.Offline;
     public string? RoomCode { get; private set; }
@@ -119,6 +121,7 @@ public class SceneSyncService : MediatorSubscriberBase
         _serviceProvider = serviceProvider;
 
         Mediator.Subscribe<FrameworkUpdateMessage>(this, _ => OnFrameworkUpdate());
+        _gPoseService.OnGPoseStateChange += OnGPoseChanged;
     }
 
     public static string FormatCode(string code)
@@ -266,6 +269,7 @@ public class SceneSyncService : MediatorSubscriberBase
         }
 
         ReconcileRemote();
+        ProcessDespawns();
 
         if(Status == SyncStatus.Connected && DateTime.UtcNow >= _nextCapture)
         {
@@ -439,13 +443,9 @@ public class SceneSyncService : MediatorSubscriberBase
 
         peer.Reassembler.Clear();
 
-        if(peer.Folder is not null && _entityManager.EntityExists(peer.Folder.Id))
-        {
-            if(peer.Folder.TryGetCapability<FolderCapability>(out var folderCapability))
-                folderCapability.DeleteFolderDestroyChildren();
-            else
-                _entityManager.DetachEntity(peer.Folder, true);
-        }
+        // Removed once its items have been torn down, one per frame.
+        if(peer.Folder is not null)
+            _orphanFolders.Add(peer.Folder);
 
         peer.Folder = null;
     }
@@ -594,6 +594,12 @@ public class SceneSyncService : MediatorSubscriberBase
                     Brio.Log.Warning(ex, $"FlashBang: couldn't update a {kind.Type} from {item.Owner.Name}.");
                     item.Dirty.Clear();
                 }
+
+                if(item.RespawnRequested)
+                {
+                    item.RespawnRequested = false;
+                    HideItem(item);
+                }
             }
         }
     }
@@ -614,25 +620,116 @@ public class SceneSyncService : MediatorSubscriberBase
     }
 
     // Takes the item out of our scene but keeps its data, so it can be shown again.
+    // Takes the item out of our scene but keeps its data, so it can be shown again. The game
+    // object itself is torn down later, one per frame (see ProcessDespawns), so a burst of
+    // removals never destroys several actors in the same tick.
     private void HideItem(RemoteItem item)
     {
         item.Generation++;
         item.Spawning = false;
         item.Busy = false;
 
-        if(item.Entity is not null && SafeIsAlive(item))
+        if(item.Entity is not null || item.State is not null)
+            _despawns.Enqueue(new RemoteItem(item.Owner, item.Id, item.Kind) { Entity = item.Entity, State = item.State });
+
+        item.Entity = null;
+        item.State = null;
+        item.MarkAllDirty();
+    }
+
+    // Cleans up one hidden item: first what's kept outside the scene (Penumbra collection,
+    // Customize+ profile) while the object still exists, then the object.
+    private void ProcessDespawns()
+    {
+        if(!_despawns.TryDequeue(out var ghost))
         {
+            RemoveEmptyPeerFolders();
+            return;
+        }
+
+        var alive = _gPoseService.IsGPosing && ghost.Entity is not null && SafeIsAlive(ghost);
+
+        try
+        {
+            ghost.Kind.Release(ghost, alive);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't clean up a {ghost.Kind.Type} from {ghost.Owner.Name}.");
+        }
+
+        if(!alive)
+            return;
+
+        try
+        {
+            ghost.Kind.Hide(ghost);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't remove a {ghost.Kind.Type} from {ghost.Owner.Name}.");
+        }
+    }
+
+    // Folders of players who left or stopped syncing, once everything in them is gone.
+    private void RemoveEmptyPeerFolders()
+    {
+        foreach(var folder in _orphanFolders.ToList())
+        {
+            if(!_entityManager.EntityExists(folder.Id))
+            {
+                _orphanFolders.Remove(folder);
+                continue;
+            }
+
+            if(folder.Children.Any())
+                continue;
+
+            _orphanFolders.Remove(folder);
             try
             {
-                item.Kind.Hide(item);
+                _entityManager.DetachEntity(folder, true);
             }
             catch(Exception ex)
             {
-                Brio.Log.Warning(ex, $"FlashBang: couldn't remove a {item.Kind.Type} from {item.Owner.Name}.");
+                Brio.Log.Warning(ex, "FlashBang: couldn't remove an empty player folder.");
             }
         }
+    }
 
-        ForgetEntity(item);
+    // Leaving GPose: Brio removes every actor, light and object itself. Let go of ours without
+    // touching them, and show them again from their latest state next time.
+    private void OnGPoseChanged(bool gposing)
+    {
+        if(gposing)
+            return;
+
+        foreach(var ghost in _despawns)
+            SafeRelease(ghost, false);
+        _despawns.Clear();
+
+        foreach(var item in _remote.Values)
+        {
+            item.Generation++;
+            item.Spawning = false;
+            item.Busy = false;
+            SafeRelease(item, false);
+            item.Entity = null;
+            item.State = null;
+            item.MarkAllDirty();
+        }
+    }
+
+    private static void SafeRelease(RemoteItem item, bool alive)
+    {
+        try
+        {
+            item.Kind.Release(item, alive);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't clean up a {item.Kind.Type} from {item.Owner.Name}.");
+        }
     }
 
     private void RemoveItem(RemoteItem item)
@@ -641,16 +738,10 @@ public class SceneSyncService : MediatorSubscriberBase
         item.Removed = true;
     }
 
+    // The object went away on its own (deleted, or dropped by the game); nothing left to destroy.
     private static void ForgetEntity(RemoteItem item)
     {
-        try
-        {
-            item.Kind.Release(item);
-        }
-        catch(Exception ex)
-        {
-            Brio.Log.Warning(ex, $"FlashBang: couldn't clean up a {item.Kind.Type} from {item.Owner.Name}.");
-        }
+        SafeRelease(item, false);
 
         item.Entity = null;
         item.State = null;
@@ -680,6 +771,11 @@ public class SceneSyncService : MediatorSubscriberBase
     // Reads everything we share and queues whatever changed.
     private void CaptureOwned()
     {
+        // Leaving GPose tears down our scene, but our things stay shared: nothing is removed for
+        // others until we delete them, take them out of Sync, stop syncing or leave the room.
+        if(!_gPoseService.IsGPosing)
+            return;
+
         var folder = FindSyncFolder();
         var seen = new HashSet<EntityId>();
 
@@ -818,6 +914,7 @@ public class SceneSyncService : MediatorSubscriberBase
 
     public override void Dispose()
     {
+        _gPoseService.OnGPoseStateChange -= OnGPoseChanged;
         Disconnect(null);
         base.Dispose();
     }

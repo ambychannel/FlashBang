@@ -27,9 +27,10 @@ public class SyncModApplier(
 
     public bool IsAvailable => penumbraService.IsAvailable;
 
-    public async Task<Applied?> Apply(ActorEntity entity, SyncActorMods mods, string? glamourerState, Applied? previous)
+    // The actor can be removed at any await, so stillThere is checked before each game call.
+    public async Task<Applied?> Apply(ActorEntity entity, SyncActorMods mods, string? glamourerState, Applied? previous, Func<bool> stillThere)
     {
-        if(!penumbraService.IsAvailable)
+        if(!penumbraService.IsAvailable || !await framework.RunOnFrameworkThread(stillThere))
             return previous;
 
         var gameObject = entity.GameObject;
@@ -53,12 +54,21 @@ public class SyncModApplier(
         var applied = previous ?? new Applied { Collection = collection };
         var applicationId = Guid.NewGuid();
 
+        if(!await framework.RunOnFrameworkThread(stillThere))
+            return applied;
+
         await penumbraService.AssignTemporaryCollectionAsync(collection, index);
         await penumbraService.SetTemporaryModsAsync(applicationId, collection, paths);
         await penumbraService.SetManipulationDataAsync(applicationId, collection, mods.Meta);
 
+        if(!await framework.RunOnFrameworkThread(stillThere))
+            return applied;
+
         if(glamourerState is not null && glamourerService.IsAvailable)
-            await framework.RunOnFrameworkThread(() => glamourerService.SetState(gameObject, glamourerState));
+            await framework.RunOnFrameworkThread(() => { if(stillThere()) glamourerService.SetState(gameObject, glamourerState); });
+
+        if(!await framework.RunOnFrameworkThread(stillThere))
+            return applied;
 
         await redrawService.RedrawAndWait(gameObject);
 
@@ -66,6 +76,9 @@ public class SyncModApplier(
         {
             await framework.RunOnFrameworkThread(() =>
             {
+                if(!stillThere())
+                    return;
+
                 if(!string.IsNullOrEmpty(mods.CustomizePlus))
                 {
                     customizePlusService.SetProfile(gameObject, mods.CustomizePlus);

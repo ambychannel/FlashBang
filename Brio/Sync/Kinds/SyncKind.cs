@@ -42,8 +42,9 @@ public abstract class SyncKind
     public abstract void Hide(RemoteItem item);
 
     // Called whenever our copy of an item goes away (hidden, deleted, or the game dropped it), to
-    // let go of anything kept for it outside the scene.
-    public virtual void Release(RemoteItem item) { }
+    // let go of anything kept for it outside the scene. `alive` says whether the game object
+    // still exists and may be touched.
+    public virtual void Release(RemoteItem item, bool alive) { }
     public abstract bool IsAlive(RemoteItem item);
 }
 
@@ -59,6 +60,10 @@ public class RemoteItem(SyncPeer owner, Guid id, SyncKind kind)
 
     public Entity? Entity { get; set; }
     public bool Spawning { get; set; }
+
+    // Set by a kind when the item has to be spawned again (a different model, say); the engine
+    // tears the old one down safely and shows it again.
+    public bool RespawnRequested { get; set; }
     public DateTime SpawnStarted { get; set; }
     public DateTime NextAttempt { get; set; }
 

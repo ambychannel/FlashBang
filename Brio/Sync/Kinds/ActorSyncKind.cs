@@ -210,7 +210,7 @@ public class ActorSyncKind(
             // A minion or mount needs a slot reserved when the actor is spawned.
             if(appearance.Companion.Kind != CompanionKind.None && !state.HasAttachments)
             {
-                Respawn(item);
+                item.RespawnRequested = true;
                 return;
             }
 
@@ -218,7 +218,7 @@ public class ActorSyncKind(
 
             item.Busy = true;
             var generation = item.Generation;
-            _ = ApplyAppearance(entity, appearance, state).ContinueWith(_ => framework.RunOnFrameworkThread(() =>
+            _ = ApplyAppearance(entity, appearance, state, () => item.IsCurrent(generation) && IsAlive(item)).ContinueWith(_ => framework.RunOnFrameworkThread(() =>
             {
                 if(item.IsCurrent(generation))
                     item.Busy = false;
@@ -266,7 +266,7 @@ public class ActorSyncKind(
         var generation = item.Generation;
         var glamourerState = item.Parts.TryGetValue(AppearancePart, out var appearance) ? ((SyncActorAppearance)appearance).GlamourerState : null;
 
-        _ = modApplier.Apply(entity, mods, glamourerState, state.Mods).ContinueWith(task => framework.RunOnFrameworkThread(() =>
+        _ = modApplier.Apply(entity, mods, glamourerState, state.Mods, () => item.IsCurrent(generation) && IsAlive(item)).ContinueWith(task => framework.RunOnFrameworkThread(() =>
         {
             if(task.Exception is not null)
                 Brio.Log.Warning(task.Exception, $"FlashBang: couldn't apply the mods on {entity.FriendlyName}.");
@@ -290,12 +290,16 @@ public class ActorSyncKind(
         }));
     }
 
-    private async Task ApplyAppearance(ActorEntity entity, SyncActorAppearance dto, SpawnedState state)
+    // The actor can be removed at any await, so stillThere is checked before each game call.
+    private async Task ApplyAppearance(ActorEntity entity, SyncActorAppearance dto, SpawnedState state, Func<bool> stillThere)
     {
         await framework.RunOnTick(async () =>
         {
             try
             {
+                if(!stillThere())
+                    return;
+
                 var appearance = entity.GetCapability<ActorAppearanceCapability>();
 
                 if(dto.GlamourerState is not null && glamourerService.IsAvailable)
@@ -309,9 +313,12 @@ public class ActorSyncKind(
                     await appearance.SetAppearance(dto.Appearance, AppearanceImportOptions.All);
                 }
 
+                if(!stillThere())
+                    return;
+
                 await redrawService.WaitForDrawing(entity.GameObject);
 
-                if(state.Companion != dto.Companion && entity.TryGetCapability<CompanionCapability>(out var companion))
+                if(stillThere() && state.Companion != dto.Companion && entity.TryGetCapability<CompanionCapability>(out var companion))
                 {
                     companion.SetCompanion(dto.Companion);
                     state.Companion = dto.Companion;
@@ -348,21 +355,11 @@ public class ActorSyncKind(
         posing.ModelPosing.Transform = new Transform { Position = pose.Position, Rotation = pose.Rotation, Scale = pose.Scale };
     }
 
-    private void Respawn(RemoteItem item)
-    {
-        Hide(item);
-        Release(item);
-        item.Generation++;
-        item.Entity = null;
-        item.State = null;
-        item.MarkAllDirty();
-    }
-
-    public override void Release(RemoteItem item)
+    public override void Release(RemoteItem item, bool alive)
     {
         if(item.State is SpawnedState { Mods: { } applied } state)
         {
-            modApplier.Remove(item.Entity as ActorEntity, applied);
+            modApplier.Remove(alive ? item.Entity as ActorEntity : null, applied);
             state.Mods = null;
         }
     }

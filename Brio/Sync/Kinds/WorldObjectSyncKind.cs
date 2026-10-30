@@ -82,11 +82,7 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         if(Identity.Of(dto.Object) != state.Identity)
         {
             // Swapped for a different model; replace it.
-            Hide(item);
-            item.Generation++;
-            item.Entity = null;
-            item.State = null;
-            item.MarkAllDirty();
+            item.RespawnRequested = true;
             return;
         }
 
