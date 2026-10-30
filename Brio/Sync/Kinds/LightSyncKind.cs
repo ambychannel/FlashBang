@@ -4,6 +4,7 @@ using Brio.Entities.Core;
 using Brio.Entities.World;
 using Brio.Game.World;
 using Brio.Services.Models;
+using System;
 using System.Numerics;
 
 namespace Brio.Sync.Kinds;
@@ -17,12 +18,16 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
     public override bool CanShare(Entity entity)
         => entity is LightEntity light && light.GameLight.IsValid && !light.GameLight.IsWorldLight && !light.GameLight.IsGPoseLight;
 
-    public override object? Capture(Entity entity, byte part)
+    public override object? Capture(SyncItem item, byte part)
     {
-        var light = (LightEntity)entity;
+        var light = (LightEntity)item.Entity!;
         var dto = lightingService.SaveLightDTO(light.GameLight, Vector3.Zero);
         if(dto is null)
             return null;
+
+        // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
+        if(item.Motion is TransformMotion motion)
+            dto.Transform = motion.To;
 
         dto.FriendlyName = light.RawName;
         dto.IsVisible = light.GameLight.IsVisible;
@@ -37,7 +42,7 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
         return dto is not null && SyncValidation.IsValid(dto) ? dto : null;
     }
 
-    public override void Show(RemoteItem item, FolderEntity folder)
+    public override void Show(SyncItem item, FolderEntity folder)
     {
         var dto = (LightDTO)item.Parts[0];
         var generation = ++item.Generation;
@@ -54,12 +59,12 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
 
             item.Spawning = false;
             item.Entity = entity;
-            entity.IsSynced = true;
+            entity.IsSynced = !item.Mine;
             entity.GameLight.SetVisibility(dto.IsVisible);
         });
     }
 
-    public override unsafe void Apply(RemoteItem item)
+    public override unsafe void Apply(SyncItem item)
     {
         item.Dirty.Clear();
 
@@ -69,7 +74,7 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
             return;
 
         if(entity.TryGetCapability<LightTransformCapability>(out var transform))
-            transform.Transform = dto.Transform;
+            item.Motion = new TransformMotion(transform.Transform, dto.Transform, DateTime.UtcNow);
 
         var gameLight = entity.GameLight.GameLight;
         var render = gameLight->RenderLight;
@@ -94,12 +99,27 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
         gameLight->UpdateTransforms(false);
     }
 
-    public override void Hide(RemoteItem item)
+    public override unsafe void Animate(SyncItem item, DateTime now)
+    {
+        if(item.Motion is not TransformMotion motion || item.Entity is not LightEntity entity || !entity.GameLight.IsValid)
+            return;
+
+        if(entity.TryGetCapability<LightTransformCapability>(out var transform))
+        {
+            transform.Transform = motion.At(now);
+            entity.GameLight.GameLight->UpdateTransforms(false);
+        }
+
+        if(motion.IsDone(now))
+            item.Motion = null;
+    }
+
+    public override void Hide(SyncItem item)
     {
         if(item.Entity is LightEntity entity && entity.GameLight.IsValid)
             lightingService.Destroy(entity.GameLight);
     }
 
-    public override bool IsAlive(RemoteItem item)
+    public override bool IsAlive(SyncItem item)
         => item.Entity is LightEntity entity && entity.GameLight.IsValid && entityManager.EntityExists(entity.Id);
 }

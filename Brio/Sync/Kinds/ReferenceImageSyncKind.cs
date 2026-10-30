@@ -53,9 +53,13 @@ public class ReferenceImageSyncKind : SyncKind
 
     public override bool CanShare(Entity entity) => entity is ReferenceImageEntity;
 
-    public override object? Capture(Entity entity, byte part)
+    // The picture is the creator's; others can move and resize the window.
+    public override bool Editable(byte part) => part == ViewPart;
+    public override bool AlwaysSent(byte part) => part == ImagePart;
+
+    public override object? Capture(SyncItem item, byte part)
     {
-        var image = (ReferenceImageEntity)entity;
+        var image = (ReferenceImageEntity)item.Entity!;
 
         if(part == ViewPart)
         {
@@ -138,7 +142,7 @@ public class ReferenceImageSyncKind : SyncKind
         return image is not null && SyncValidation.IsValid(image) ? image : null;
     }
 
-    public override void Show(RemoteItem item, FolderEntity folder)
+    public override void Show(SyncItem item, FolderEntity folder)
     {
         var dto = (SyncReferenceImage)item.Parts[ImagePart];
         item.Generation++;
@@ -153,7 +157,7 @@ public class ReferenceImageSyncKind : SyncKind
 
         var entity = _referenceImageService.Spawn(path);
         _entityManager.MoveEntity(entity, folder);
-        entity.IsSynced = true;
+        entity.IsSynced = !item.Mine;
         entity.FriendlyName = string.IsNullOrWhiteSpace(dto.Name) ? "Reference image" : dto.Name;
 
         item.State = dto;
@@ -162,11 +166,11 @@ public class ReferenceImageSyncKind : SyncKind
         item.Dirty.Remove(ImagePart);
     }
 
-    public override void Apply(RemoteItem item)
+    public override void Apply(SyncItem item)
     {
         var entity = (ReferenceImageEntity)item.Entity!;
 
-        if(item.Dirty.Remove(ImagePart) && !ReferenceEquals(item.State, item.Parts[ImagePart]))
+        if(item.Dirty.Remove(ImagePart) && !item.Mine && !ReferenceEquals(item.State, item.Parts[ImagePart]))
         {
             // A different picture; replace the window.
             item.RespawnRequested = true;
@@ -184,7 +188,7 @@ public class ReferenceImageSyncKind : SyncKind
         }
     }
 
-    public override void Hide(RemoteItem item)
+    public override void Hide(SyncItem item)
     {
         if(item.Entity is not ReferenceImageEntity entity)
             return;
@@ -202,6 +206,6 @@ public class ReferenceImageSyncKind : SyncKind
         }
     }
 
-    public override bool IsAlive(RemoteItem item)
+    public override bool IsAlive(SyncItem item)
         => item.Entity is ReferenceImageEntity entity && entity.IsAttached && _entityManager.EntityExists(entity.Id);
 }

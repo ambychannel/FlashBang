@@ -16,6 +16,8 @@ using Brio.Sync.Mods;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using System;
+using System.Collections.Generic;
+using System.Numerics;
 using System.Threading.Tasks;
 
 namespace Brio.Sync.Kinds;
@@ -46,9 +48,13 @@ public class ActorSyncKind(
     public override TimeSpan CaptureInterval(byte part) => part switch
     {
         AppearancePart => TimeSpan.FromSeconds(2),
-        PosePart => TimeSpan.FromMilliseconds(500),
+        PosePart => TimeSpan.FromMilliseconds(200),
         _ => TimeSpan.FromSeconds(5),
     };
+
+    // Mods are the creator's, and keep up with the creator's look once shared.
+    public override bool Editable(byte part) => part != ModsPart;
+    public override bool AlwaysSent(byte part) => part == ModsPart;
 
     private class SpawnedState(bool hasAttachments)
     {
@@ -58,7 +64,12 @@ public class ActorSyncKind(
         public SyncModApplier.Applied? Mods { get; set; }
         public SyncActorMods? ModsShown { get; set; }
         public DateTime NextModCheck { get; set; }
+
+        // The last pose applied, for gliding to the next one.
+        public PoseData? Pose { get; set; }
     }
+
+    private record PoseMotion(PoseData From, PoseData To, DateTime Start);
 
     // Ours
 
@@ -68,15 +79,37 @@ public class ActorSyncKind(
         && actor.GameObject is ICharacter && actor.GameObject.IsValid()
         && actor.HasCapability<PosingCapability>() && actor.HasCapability<ActorAppearanceCapability>();
 
-    public override object? Capture(Entity entity, byte part)
+    public override object? Capture(SyncItem item, byte part)
     {
-        var actor = (ActorEntity)entity;
+        var actor = (ActorEntity)item.Entity!;
         return part switch
         {
             AppearancePart => CaptureAppearance(actor),
-            PosePart => CapturePose(actor),
-            _ => modSource.Get(actor),
+            // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
+            PosePart => item.Motion is PoseMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor),
+            _ => CaptureMods(item, actor),
         };
+    }
+
+    private SyncActorMods? CaptureMods(SyncItem item, ActorEntity actor)
+    {
+        if(!modSource.IsAvailable)
+        {
+            item.Status = "Mods aren't shared: Penumbra isn't available.";
+            return null;
+        }
+
+        if(item.SyncNowRequested)
+            modSource.Refresh(actor);
+
+        var mods = modSource.Get(actor);
+        item.Status = mods switch
+        {
+            null => "Reading mods...",
+            { Files.Count: 0 } => "No modded files found on this actor.",
+            _ => $"Sharing {mods.Files.Count} mod files ({mods.TotalBytes / 1048576} MB).",
+        };
+        return mods;
     }
 
     private static unsafe SyncActorAppearance CaptureAppearance(ActorEntity actor)
@@ -148,7 +181,19 @@ public class ActorSyncKind(
         return pose is not null && SyncValidation.IsValid(pose) ? pose : null;
     }
 
-    public override unsafe void Show(RemoteItem item, FolderEntity folder)
+    public override void OnSent(SyncItem item, byte part)
+    {
+        if(part == AppearancePart && item.Mine && item.Entity is ActorEntity actor)
+            modSource.Refresh(actor);
+    }
+
+    public override void Adopt(SyncItem item)
+    {
+        // Our own actor: never respawned from here, so it counts as having room for a companion.
+        item.State = new SpawnedState(true);
+    }
+
+    public override unsafe void Show(SyncItem item, FolderEntity folder)
     {
         var appearance = (SyncActorAppearance)item.Parts[AppearancePart];
         var hasAttachments = appearance.Companion.Kind != CompanionKind.None;
@@ -182,7 +227,7 @@ public class ActorSyncKind(
                     if(entityManager.EntityExists(folder.Id))
                         entityManager.MoveEntity(entity, folder);
 
-                    entity.IsSynced = true;
+                    entity.IsSynced = !item.Mine;
                     entity.FriendlyName = appearance.Name;
 
                     if(entity.TryGetCapability<ActionTimelineCapability>(out var timeline))
@@ -198,7 +243,7 @@ public class ActorSyncKind(
             dontStartFor: 3);
     }
 
-    public override void Apply(RemoteItem item)
+    public override void Apply(SyncItem item)
     {
         var entity = (ActorEntity)item.Entity!;
         var state = (SpawnedState)item.State!;
@@ -208,7 +253,7 @@ public class ActorSyncKind(
             var appearance = (SyncActorAppearance)item.Parts[AppearancePart];
 
             // A minion or mount needs a slot reserved when the actor is spawned.
-            if(appearance.Companion.Kind != CompanionKind.None && !state.HasAttachments)
+            if(appearance.Companion.Kind != CompanionKind.None && !state.HasAttachments && !item.Mine)
             {
                 item.RespawnRequested = true;
                 return;
@@ -227,18 +272,24 @@ public class ActorSyncKind(
         }
 
         if(item.Dirty.Remove(PosePart) && item.Parts.TryGetValue(PosePart, out var poseValue))
-            ApplyPose(entity, (SyncActorPose)poseValue);
+            ApplyPose(item, entity, state, (SyncActorPose)poseValue);
 
-        if(item.Dirty.Remove(ModsPart) && item.Parts.TryGetValue(ModsPart, out var modsValue))
+        if(item.Dirty.Remove(ModsPart) && !item.Mine && item.Parts.TryGetValue(ModsPart, out var modsValue))
             UpdateMods(item, entity, state, (SyncActorMods)modsValue);
     }
 
     // Fetches whatever files are missing, then swaps the actor over to the owner's mods. Until
     // then it keeps its Glamourer look and shows download progress.
-    private void UpdateMods(RemoteItem item, ActorEntity entity, SpawnedState state, SyncActorMods mods)
+    private void UpdateMods(SyncItem item, ActorEntity entity, SpawnedState state, SyncActorMods mods)
     {
-        if(ReferenceEquals(mods, state.ModsShown) || !modApplier.IsAvailable)
+        if(ReferenceEquals(mods, state.ModsShown))
             return;
+
+        if(!modApplier.IsAvailable)
+        {
+            item.Status = "Can't show their mods: Penumbra isn't available.";
+            return;
+        }
 
         if(DateTime.UtcNow < state.NextModCheck)
         {
@@ -247,11 +298,14 @@ public class ActorSyncKind(
         }
         state.NextModCheck = DateTime.UtcNow + ModCheckInterval;
 
-        var progress = modTransfer.Want(item.Owner.Id, mods);
+        var progress = modTransfer.Want(item.Creator!.Id, mods);
         if(!progress.Done)
         {
             entity.IsLoading = true;
             entity.LoadingDescription = $"Downloading look {progress.HaveBytes / 1048576}/{Math.Max(1, progress.TotalBytes / 1048576)} MB";
+            item.Status = modTransfer.RelayRejectsFiles
+                ? "The relay needs updating for mod transfer."
+                : $"Downloading {mods.Files.Count} mod files: {progress.HaveBytes / 1048576}/{Math.Max(1, progress.TotalBytes / 1048576)} MB.";
             item.Dirty.Add(ModsPart);
             return;
         }
@@ -282,6 +336,11 @@ public class ActorSyncKind(
 
             state.Mods = applied;
             state.ModsShown = mods;
+            item.Status = mods.Files.Count == 0
+                ? "Their actor has no modded files."
+                : progress.FailedFiles > 0
+                    ? $"Applied {mods.Files.Count - progress.FailedFiles} of {mods.Files.Count} mod files; {progress.FailedFiles} couldn't be downloaded."
+                    : $"Applied {mods.Files.Count} mod files ({mods.TotalBytes / 1048576} MB).";
             entity.IsLoading = false;
             item.Busy = false;
 
@@ -331,9 +390,15 @@ public class ActorSyncKind(
         });
     }
 
-    private void ApplyPose(ActorEntity entity, SyncActorPose dto)
+    // The body glides from the last pose to this one (see Animate); a minion or mount just snaps.
+    private void ApplyPose(SyncItem item, ActorEntity entity, SpawnedState state, SyncActorPose dto)
     {
-        Import(entity, dto.Body);
+        if(state.Pose is null)
+            Import(entity, dto.Body);
+        else
+            item.Motion = new PoseMotion(state.Pose, dto.Body, DateTime.UtcNow);
+
+        state.Pose = dto.Body;
 
         if(dto.Companion is not null
             && entity.TryGetCapability<CompanionCapability>(out var companion)
@@ -346,6 +411,44 @@ public class ActorSyncKind(
         }
     }
 
+    public override void Animate(SyncItem item, DateTime now)
+    {
+        if(item.Motion is not PoseMotion motion || item.Entity is not ActorEntity entity)
+            return;
+
+        var t = (float)Math.Clamp((now - motion.Start) / TransformMotion.Duration, 0, 1);
+        Import(entity, t >= 1 ? motion.To : Blend(motion.From, motion.To, t));
+
+        if(t >= 1)
+            item.Motion = null;
+    }
+
+    private static PoseData Blend(PoseData from, PoseData to, float t)
+    {
+        static PoseData.Bone Mix(PoseData.Bone a, PoseData.Bone b, float t) => new()
+        {
+            Position = Vector3.Lerp(a.Position, b.Position, t),
+            Rotation = Quaternion.Slerp(a.Rotation, b.Rotation, t),
+            Scale = Vector3.Lerp(a.Scale, b.Scale, t),
+        };
+
+        var bones = new Dictionary<string, PoseData.Bone>(to.Bones.Count);
+        foreach(var (name, bone) in to.Bones)
+            bones[name] = from.Bones.TryGetValue(name, out var start) ? Mix(start, bone, t) : bone;
+
+        return new PoseData
+        {
+            Bones = bones,
+            MainHand = to.MainHand,
+            OffHand = to.OffHand,
+            Prop = to.Prop,
+            Ornament = to.Ornament,
+            Position = Vector3.Lerp(from.Position, to.Position, t),
+            Rotation = Quaternion.Slerp(from.Rotation, to.Rotation, t),
+            Scale = Vector3.Lerp(from.Scale, to.Scale, t),
+        };
+    }
+
     private void Import(ActorEntity entity, PoseData pose)
     {
         if(!entity.TryGetCapability<PosingCapability>(out var posing))
@@ -355,7 +458,7 @@ public class ActorSyncKind(
         posing.ModelPosing.Transform = new Transform { Position = pose.Position, Rotation = pose.Rotation, Scale = pose.Scale };
     }
 
-    public override void Release(RemoteItem item, bool alive)
+    public override void Release(SyncItem item, bool alive)
     {
         if(item.State is SpawnedState { Mods: { } applied } state)
         {
@@ -364,12 +467,12 @@ public class ActorSyncKind(
         }
     }
 
-    public override void Hide(RemoteItem item)
+    public override void Hide(SyncItem item)
     {
         if(item.Entity is ActorEntity entity)
             entityManager.EntityManagerContainer.GetCapability<ActorContainerCapability>().DestroyCharacter(entity);
     }
 
-    public override bool IsAlive(RemoteItem item)
+    public override bool IsAlive(SyncItem item)
         => item.Entity is ActorEntity entity && entity.GameObject.IsValid() && entityManager.EntityExists(entity.Id);
 }

@@ -4,6 +4,7 @@ using Brio.Entities.WorldObjects;
 using Brio.Game.WorldObjects;
 using Brio.Game.WorldObjects.Objects;
 using Brio.Services.Models;
+using System;
 using System.Numerics;
 
 namespace Brio.Sync.Kinds;
@@ -32,11 +33,16 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
     public override bool CanShare(Entity entity)
         => entity is WorldObjectEntity worldObject && worldObject.GameBgObject.IsValid;
 
-    public override object? Capture(Entity entity, byte part)
+    public override object? Capture(SyncItem item, byte part)
     {
-        var worldObject = (WorldObjectEntity)entity;
+        var worldObject = (WorldObjectEntity)item.Entity!;
         var dto = WorldObjectDTO.ToDTO(worldObject, Vector3.Zero);
         dto.RelativePosition = Vector3.Zero;
+
+        // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
+        if(item.Motion is TransformMotion motion)
+            dto.Transform = motion.To;
+
         return new SyncWorldObject { Object = dto, IsVisible = worldObject.GameBgObject.IsVisible };
     }
 
@@ -48,7 +54,14 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         return dto is not null && SyncValidation.IsValid(dto) ? dto : null;
     }
 
-    public override void Show(RemoteItem item, FolderEntity folder)
+    public override void Adopt(SyncItem item)
+    {
+        var entity = (WorldObjectEntity)item.Entity!;
+        var dto = WorldObjectDTO.ToDTO(entity, Vector3.Zero);
+        item.State = new SpawnedState(Identity.Of(dto)) { Look = (dto.Color, dto.StainID) };
+    }
+
+    public override void Show(SyncItem item, FolderEntity folder)
     {
         var dto = (SyncWorldObject)item.Parts[0];
         var generation = ++item.Generation;
@@ -62,7 +75,7 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
                 return;
             }
 
-            entity.IsSynced = true;
+            entity.IsSynced = !item.Mine;
             item.State = new SpawnedState(Identity.Of(dto.Object)) { Look = (dto.Object.Color, dto.Object.StainID) };
             item.Entity = entity;
             item.Spawning = false;
@@ -70,7 +83,7 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         });
     }
 
-    public override unsafe void Apply(RemoteItem item)
+    public override unsafe void Apply(SyncItem item)
     {
         item.Dirty.Clear();
 
@@ -79,14 +92,15 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         var dto = (SyncWorldObject)item.Parts[0];
         var obj = entity.GameBgObject;
 
-        if(Identity.Of(dto.Object) != state.Identity)
+        // Our own object can't be swapped for another model from here; everyone else's copy can.
+        if(Identity.Of(dto.Object) != state.Identity && !item.Mine)
         {
             // Swapped for a different model; replace it.
             item.RespawnRequested = true;
             return;
         }
 
-        obj.SetTransform(dto.Object.Transform);
+        item.Motion = new TransformMotion(obj.Transform, dto.Object.Transform, DateTime.UtcNow);
         obj.IsVisible = dto.IsVisible;
         entity.RawName = dto.Object.FriendlyName;
 
@@ -119,12 +133,23 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         state.Look = look;
     }
 
-    public override void Hide(RemoteItem item)
+    public override void Animate(SyncItem item, DateTime now)
+    {
+        if(item.Motion is not TransformMotion motion || item.Entity is not WorldObjectEntity entity || !entity.GameBgObject.IsValid)
+            return;
+
+        entity.GameBgObject.SetTransform(motion.At(now));
+
+        if(motion.IsDone(now))
+            item.Motion = null;
+    }
+
+    public override void Hide(SyncItem item)
     {
         if(item.Entity is WorldObjectEntity entity)
             worldObjectService.Destroy(entity.GameBgObject);
     }
 
-    public override bool IsAlive(RemoteItem item)
+    public override bool IsAlive(SyncItem item)
         => item.Entity is WorldObjectEntity entity && entity.GameBgObject.IsValid && entityManager.EntityExists(entity.Id);
 }

@@ -43,6 +43,9 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
     private readonly SemaphoreSlim _serveSignal = new(0);
 
     private SyncRelayClient? _client;
+
+    // Set when the relay refused a file chunk because it's too old to carry them.
+    public bool RelayRejectsFiles { get; set; }
     private CancellationTokenSource? _cts;
 
     // Framework thread

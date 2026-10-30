@@ -2,7 +2,7 @@
 
 Multiplayer GPose for Final Fantasy XIV, built on [Brio](https://github.com/Etheirys/Brio).
 
-Put actors, lights, props, furniture, VFX, cameras and reference images in a **Sync** folder in the scene list, share a room code with a friend, and once they agree to sync, everything in that folder shows up in their GPose too, live.
+Put actors, lights, props, furniture, VFX, cameras and reference images in a **Sync** folder in the scene list, share a room code with a friend, and once they agree to sync, press **Sync now** on an item to send it, or turn on **Live** to send changes as you make them. Anyone syncing can edit or delete anything in the folder.
 
 > FlashBang is an early, unofficial project. It is not made or supported by the Brio team or the Lightless team. Please don't report FlashBang problems to them.
 

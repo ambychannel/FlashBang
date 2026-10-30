@@ -50,7 +50,8 @@ public class MainWindow : Window, IDisposable
         AutoSaveService autoSaveService,
         MCDFService mCDFService,
         EntitySectionWindow entitySectionWindow,
-        ProjectSystem projectSystem
+        ProjectSystem projectSystem,
+        Sync.SceneSyncService sceneSyncService
         )
         : base($" {Brio.Name} [{configService.Version}]###brio_main_window", ImGuiWindowFlags.AlwaysAutoResize)
     //: base($" {Brio.Name} [0.8.0.0]###brio_main_window", ImGuiWindowFlags.AlwaysAutoResize)
@@ -63,7 +64,7 @@ public class MainWindow : Window, IDisposable
         _infoWindow = infoWindow;
         _entityManager = entityManager;
         _gPoseService = gPoseService;
-        _entitySelector = new(_entityManager, _gPoseService);
+        _entitySelector = new(_entityManager, _gPoseService, sceneSyncService);
         _sceneService = sceneService;
         _projectWindow = projectWindow;
         _autoSaveService = autoSaveService;

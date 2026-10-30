@@ -2,6 +2,7 @@ using Brio.Entities;
 using Brio.Entities.Core;
 using Brio.Game.GPose;
 using Brio.Input;
+using Brio.Sync;
 using Brio.UI.Controls.Stateless;
 using Brio.UI.Theming;
 using Brio.UI.Widgets.Core;
@@ -16,7 +17,7 @@ using System.Numerics;
 
 namespace Brio.UI.Entitites;
 
-public class EntityHierarchyView(EntityManager entityManager, GPoseService gPoseService)
+public class EntityHierarchyView(EntityManager entityManager, GPoseService gPoseService, SceneSyncService sync)
 {
     private const float OffsetWidth = 18f;
     private static float ButtonWidth => ImGui.GetWindowContentRegionMax().X;
@@ -158,9 +159,10 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
         {
             var invsButtonPos = ImGui.GetCursorPos();
             float width = ButtonWidth;
+            var buttonCount = entity.ContextButtonCount + SyncButtonCount(entity);
 
-            if(entity.ContextButtonCount >= 1)
-                width -= (33 * ImGuiHelpers.GlobalScale * entity.ContextButtonCount);
+            if(buttonCount >= 1)
+                width -= (33 * ImGuiHelpers.GlobalScale * buttonCount);
             else
                 width -= 5;
 
@@ -264,10 +266,19 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
             entity.DrawContextButton();
         }
 
+        if(SyncButtonCount(entity) > 0)
+        {
+            ImGui.SameLine();
+
+            DrawSyncButtons(entity, entity.ContextButtonCount + 1);
+        }
+
         using(var popup = ImRaii.Popup($"context_popup{entity.Id}"))
         {
             if(popup.Success)
             {
+                DrawSyncPopup(entity);
+
                 foreach(var v in entity.Capabilities)
                 {
                     if(v.Widget is not null && v.Widget.Flags.HasFlag(WidgetFlags.DrawPopup))
@@ -423,5 +434,53 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
 
         _lastSelectedId = entity.Id;
         entityManager.SetSelectedEntity(entity);
+    }
+
+    // Sync now and Live, on everything in the Sync folder except folders.
+    private int SyncButtonCount(Entity entity)
+        => entity is not FolderEntity && sync.IsInSyncFolder(entity) ? 2 : 0;
+
+    private void DrawSyncButtons(Entity entity, int position)
+    {
+        var item = sync.FindItem(entity);
+
+        if(ImBrio.FontIconButtonRight($"###{entity.Id}_sync_now", FontAwesomeIcon.SyncAlt, position + 1,
+            "Sync now: send this as it is to everyone you're syncing with", enabled: item is not null, bordered: false))
+        {
+            sync.SyncNow(item!);
+        }
+
+        ImGui.SameLine();
+
+        var live = item?.Live ?? false;
+        using(ImRaii.PushColor(ImGuiCol.Text, ThemeManager.CurrentTheme.Accent.AccentColor, live))
+        {
+            var tooltip = live
+                ? "Live: your changes to this are sent as you make them. Click to stop."
+                : "Not live: your changes are only sent when you press Sync now. Click to send them as you make them.";
+            if(ImBrio.FontIconButtonRight($"###{entity.Id}_sync_live", FontAwesomeIcon.Wifi, position, tooltip, enabled: item is not null, bordered: false))
+                sync.SetLive(item!, !live);
+        }
+    }
+
+    private void DrawSyncPopup(Entity entity)
+    {
+        if(!sync.IsInSyncFolder(entity) || entity is FolderEntity)
+            return;
+
+        var item = sync.FindItem(entity);
+        if(item is not null)
+        {
+            if(ImGui.MenuItem("Sync now"))
+                sync.SyncNow(item);
+
+            if(ImGui.MenuItem("Live sync", "", item.Live))
+                sync.SetLive(item, !item.Live);
+        }
+
+        if(ImGui.MenuItem(item is null || item.Mine && !item.Shared ? "Delete" : "Delete for everyone"))
+            sync.Delete(entity);
+
+        ImGui.Separator();
     }
 }

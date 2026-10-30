@@ -45,7 +45,7 @@ public class SyncOp
 [MessagePackObject(keyAsPropertyName: true)]
 public class SyncBatch
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     public int Version { get; set; } = CurrentVersion;
     public List<SyncOp> Ops { get; set; } = [];

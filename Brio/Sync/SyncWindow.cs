@@ -6,6 +6,7 @@ using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using System;
+using System.Linq;
 using System.Numerics;
 
 namespace Brio.Sync;
@@ -119,7 +120,7 @@ public class SyncWindow : Window, IDisposable
             ImGui.SetClipboardText(code);
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Everything you put in the Sync folder (actors, lights, props, furniture, VFX, cameras and reference images) is shared with everyone you've agreed to sync with. Their things appear in the Sync folder too. Actors bring their owner's mods: the files download from them the first time, and the actor shows its plain look until the download finishes.");
+        ImGui.TextDisabled("Put actors, lights, props, furniture, VFX, cameras and reference images in the Sync folder, then press Sync now (the arrows) to send one, or turn on Live (the signal) to send changes as you make them. Anyone syncing can edit or delete anything in the folder. Actors bring their creator's mods: the files download the first time, and the actor shows its plain look until then.");
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
@@ -170,10 +171,55 @@ public class SyncWindow : Window, IDisposable
         ImGui.Separator();
         ImGui.Spacing();
 
+        DrawItems();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
         if(ImBrio.Button("Leave room", FontAwesomeIcon.DoorOpen))
             _sync.LeaveRoom();
 
         DrawModCache();
+    }
+
+    private void DrawItems()
+    {
+        if(_sync.RelayNeedsUpdate)
+            ImGui.TextColored(ImGuiColors.DalamudRed, "The relay needs updating for mod transfer. Run 'npx wrangler deploy' in FlashBang's relay folder.");
+
+        var items = _sync.Items.ToList();
+        if(items.Count == 0)
+        {
+            ImGui.TextDisabled("Nothing in the Sync folder yet.");
+            return;
+        }
+
+        ImGui.TextUnformatted("In the Sync folder");
+
+        foreach(var item in items)
+        {
+            using var id = ImRaii.PushId(item.Id.ToString());
+
+            var name = item.Entity?.FriendlyName ?? "(not shown right now)";
+            ImGui.TextUnformatted($"{name}  ({item.Kind.Type}, made by {item.CreatorName})");
+
+            if(item.Entity is not null)
+            {
+                ImGui.SameLine();
+                if(ImGui.SmallButton("Sync now"))
+                    _sync.SyncNow(item);
+                ImGui.SameLine();
+                var live = item.Live;
+                if(ImGui.Checkbox("Live", ref live))
+                    _sync.SetLive(item, live);
+            }
+
+            if(item.Mine && !item.Shared)
+                ImGui.TextDisabled("    Not shared yet. Press Sync now or turn on Live.");
+            if(!string.IsNullOrEmpty(item.Status))
+                ImGui.TextDisabled($"    {item.Status}");
+        }
     }
 
     private void DrawModCache()

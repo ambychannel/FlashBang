@@ -15,7 +15,7 @@ namespace Brio.Sync.Mods;
 // transfer serve exactly those files, and nothing else, to linked players.
 public class SyncModSource(PenumbraService penumbraService, CustomizePlusService customizePlusService)
 {
-    private static readonly TimeSpan RebuildInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RebuildInterval = TimeSpan.FromSeconds(30);
 
     private class Entry
     {
@@ -53,6 +53,16 @@ public class SyncModSource(PenumbraService penumbraService, CustomizePlusService
         }
 
         return entry.Latest;
+    }
+
+    // Framework thread. Reads the actor's mods again on the next Get (Sync now, or its look changed).
+    public void Refresh(ActorEntity actor)
+    {
+        lock(_actors)
+        {
+            if(_actors.TryGetValue(actor.Id, out var entry))
+                entry.NextBuild = DateTime.MinValue;
+        }
     }
 
     // Framework thread. Forgets actors we no longer share.
