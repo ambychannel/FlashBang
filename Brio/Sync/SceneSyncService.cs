@@ -64,6 +64,7 @@ public class SceneSyncService : MediatorSubscriberBase
         ActivatorUtilities.CreateInstance<ActorSyncKind>(_serviceProvider),
         ActivatorUtilities.CreateInstance<LightSyncKind>(_serviceProvider),
         ActivatorUtilities.CreateInstance<WorldObjectSyncKind>(_serviceProvider),
+        ActivatorUtilities.CreateInstance<CameraSyncKind>(_serviceProvider),
     ];
 
     // Items we own, by entity.

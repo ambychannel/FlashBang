@@ -1,4 +1,5 @@
 using Brio.Core;
+using Brio.Entities.Camera;
 using Brio.Files;
 using Brio.Game.Types;
 using Brio.Game.World.Interop;
@@ -42,7 +43,7 @@ public static class SyncValidation
 
     public static bool IsValid(SyncActorAppearance dto)
     {
-        if(dto.Name.Length > MaxNameLength || (dto.GlamourerState?.Length ?? 0) > MaxGlamourerStateLength)
+        if((dto.Name?.Length ?? 0) > MaxNameLength || (dto.GlamourerState?.Length ?? 0) > MaxGlamourerStateLength)
             return false;
 
         if(!Enum.IsDefined(dto.Companion.Kind))
@@ -84,6 +85,15 @@ public static class SyncValidation
         return IsValid(obj.Transform)
             && (!obj.Color.HasValue || IsFinite(obj.Color.Value, MaxValue));
     }
+
+    public static bool IsValid(SyncCamera dto)
+        => (dto.Name?.Length ?? 0) <= MaxNameLength
+        && dto.Type is CameraType.Free or CameraType.Game
+        && IsFinite(dto.Position, MaxCoordinate) && IsFinite(dto.PositionOffset, MaxCoordinate)
+        && IsFinite(dto.TargetOffset, MaxCoordinate) && IsFinite(dto.Rotation, MaxValue)
+        && IsFinite(dto.Pan.X, MaxValue) && IsFinite(dto.Pan.Y, MaxValue)
+        && IsFinite(dto.Angle.X, MaxValue) && IsFinite(dto.Angle.Y, MaxValue)
+        && IsFinite(dto.PivotRotation, MaxValue) && IsFinite(dto.Zoom, MaxValue) && IsFinite(dto.FoV, MaxValue);
 
     // A path inside the game's data, like "bgcommon/hou/indoor/.../asset.sgb". Never a file on disk.
     public static bool IsGamePath(string? path)

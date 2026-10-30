@@ -1,8 +1,10 @@
+using Brio.Entities.Camera;
 using Brio.Files;
 using Brio.Game.Types;
 using Brio.Services.Models;
 using MessagePack;
 using System;
+using System.Numerics;
 
 namespace Brio.Sync;
 
@@ -35,4 +37,25 @@ public class SyncWorldObject
 {
     public required WorldObjectDTO Object { get; set; }
     public bool IsVisible { get; set; } = true;
+}
+
+// A Brio camera, as the values a viewer would need to look through it. Cutscene cameras aren't
+// shared because they play a file from the owner's PC.
+[Serializable]
+[MessagePackObject(keyAsPropertyName: true)]
+public class SyncCamera
+{
+    public string Name { get; set; } = "";
+    public CameraType Type { get; set; }
+
+    public Vector3 Position { get; set; }
+    public Vector3 PositionOffset { get; set; }
+    public Vector3 TargetOffset { get; set; }
+    public Vector3 Rotation { get; set; }
+    public Vector2 Pan { get; set; }
+    public Vector2 Angle { get; set; }
+    public float PivotRotation { get; set; }
+    public float Zoom { get; set; }
+    public float FoV { get; set; }
+    public bool DisableCollision { get; set; }
 }
