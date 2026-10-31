@@ -38,6 +38,10 @@ public abstract class SyncKind
     // Encoded separately so a part type can override the MessagePack type it is decoded as.
     public abstract byte[] Encode(byte part, object value);
 
+    // Whether two values of a part are close enough to count as unchanged, without encoding them.
+    // False just means "compare the encoded bytes instead".
+    public virtual bool IsSame(byte part, object a, object b) => false;
+
     // Decodes and checks one part from another player. Null means it's dropped.
     public abstract object? Decode(byte part, byte[] compressed);
 
@@ -81,6 +85,12 @@ public class PartTrack
     // instead of being sent back, so updates don't bounce between players.
     public bool Absorb { get; set; }
     public DateTime SettleUntil { get; set; }
+
+    // The value last sent or applied: what this part is believed to be for everyone.
+    public object? LastKnown { get; set; }
+
+    // When we last sent a change of our own.
+    public DateTime LastLocalChange { get; set; }
 
     public DateTime NextCapture { get; set; }
     public bool WarnedTooLarge { get; set; }
@@ -137,6 +147,9 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
 
     // A line for the Sync window, like mod download progress.
     public string? Status { get; set; }
+
+    // Why Live isn't sending something right now.
+    public string? Note { get; set; }
 
     public bool IsCurrent(int generation) => !Removed && Generation == generation;
 

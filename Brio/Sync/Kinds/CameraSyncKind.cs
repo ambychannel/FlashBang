@@ -42,6 +42,8 @@ public class CameraSyncKind(VirtualCameraManager cameraManager, EntityManager en
         };
     }
 
+    public override bool IsSame(byte part, object a, object b) => SyncCompare.Near((SyncCamera)a, (SyncCamera)b);
+
     public override byte[] Encode(byte part, object value) => SyncCodec.Encode((SyncCamera)value);
 
     public override object? Decode(byte part, byte[] compressed)

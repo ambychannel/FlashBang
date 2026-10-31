@@ -46,6 +46,8 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         return new SyncWorldObject { Object = dto, IsVisible = worldObject.GameBgObject.IsVisible };
     }
 
+    public override bool IsSame(byte part, object a, object b) => SyncCompare.Near((SyncWorldObject)a, (SyncWorldObject)b);
+
     public override byte[] Encode(byte part, object value) => SyncCodec.Encode((SyncWorldObject)value);
 
     public override object? Decode(byte part, byte[] compressed)

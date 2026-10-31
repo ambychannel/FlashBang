@@ -34,6 +34,8 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
         return dto;
     }
 
+    public override bool IsSame(byte part, object a, object b) => SyncCompare.Near((LightDTO)a, (LightDTO)b);
+
     public override byte[] Encode(byte part, object value) => SyncCodec.Encode((LightDTO)value);
 
     public override object? Decode(byte part, byte[] compressed)

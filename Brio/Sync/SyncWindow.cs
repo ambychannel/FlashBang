@@ -219,6 +219,8 @@ public class SyncWindow : Window, IDisposable
                 ImGui.TextDisabled("    Not shared yet. Press Sync now or turn on Live.");
             if(!string.IsNullOrEmpty(item.Status))
                 ImGui.TextDisabled($"    {item.Status}");
+            if(!string.IsNullOrEmpty(item.Note))
+                ImGui.TextDisabled($"    {item.Note}");
         }
     }
 

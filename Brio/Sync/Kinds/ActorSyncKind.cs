@@ -82,9 +82,25 @@ public class ActorSyncKind(
         {
             AppearancePart => CaptureAppearance(actor),
             // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
-            PosePart => item.Motion is TransformMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor),
+            PosePart => CaptureLivePose(item, actor),
             _ => CaptureMods(item, actor),
         };
+    }
+
+    private static object? CaptureLivePose(SyncItem item, ActorEntity actor)
+    {
+        // A playing animation changes every bone every frame, so it can't be streamed. Sync now
+        // still sends the pose as it is at that moment.
+        if(!item.SyncNowRequested && actor.TryGetCapability<ActionTimelineCapability>(out var timeline) && timeline.SpeedMultiplier != 0)
+        {
+            item.Note = "This actor is animating. Freeze it to share its pose live.";
+            return null;
+        }
+
+        item.Note = null;
+
+        // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
+        return item.Motion is TransformMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor);
     }
 
     private SyncActorMods? CaptureMods(SyncItem item, ActorEntity actor)
@@ -149,6 +165,13 @@ public class ActorSyncKind(
 
         return dto;
     }
+
+    public override bool IsSame(byte part, object a, object b) => part switch
+    {
+        PosePart => SyncCompare.Near((SyncActorPose)a, (SyncActorPose)b),
+        ModsPart => SyncCompare.Same((SyncActorMods)a, (SyncActorMods)b),
+        _ => false,
+    };
 
     public override byte[] Encode(byte part, object value) => part switch
     {

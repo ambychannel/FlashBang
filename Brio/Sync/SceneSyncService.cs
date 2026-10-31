@@ -55,6 +55,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan LocalChangeWins = TimeSpan.FromSeconds(2);
 
     private readonly EntityManager _entityManager;
     private readonly GPoseService _gPoseService;
@@ -265,6 +266,7 @@ public class SceneSyncService : MediatorSubscriberBase
     public void SetLive(SyncItem item, bool live)
     {
         item.Live = live;
+        item.Note = null;
         if(live)
             item.SyncNowRequested = true;
     }
@@ -356,6 +358,7 @@ public class SceneSyncService : MediatorSubscriberBase
             foreach(var track in item.Tracks)
             {
                 track.Baseline = null;
+                track.LastKnown = null;
                 track.Revision = 0;
                 track.Writer = "";
             }
@@ -640,6 +643,15 @@ public class SceneSyncService : MediatorSubscriberBase
             if(!item.Mine && item.Creator == peer)
                 item.Territory = op.Territory;
 
+            // What we already have, give or take noise: nothing to apply.
+            if(track.LastKnown is not null && kind.IsSame(op.Part, value, track.LastKnown))
+                continue;
+
+            // We're changing this right now, and our next update will win.
+            if(item.Mine && item.Live && DateTime.UtcNow - track.LastLocalChange < LocalChangeWins)
+                continue;
+
+            track.LastKnown = value;
             item.Parts[op.Part] = value;
             item.Dirty.Add(op.Part);
         }
@@ -1114,7 +1126,13 @@ public class SceneSyncService : MediatorSubscriberBase
             value = kind.Capture(item, part);
             if(value is null)
                 return false;
-            bytes = kind.Encode(part, value);
+
+            // Unchanged, give or take noise: done, without encoding anything.
+            var same = track.LastKnown is not null && kind.IsSame(part, value, track.LastKnown);
+            if(same && !force && !track.Absorb)
+                return false;
+
+            bytes = same && track.Baseline is not null ? track.Baseline : kind.Encode(part, value);
         }
         catch(Exception ex)
         {
@@ -1136,6 +1154,7 @@ public class SceneSyncService : MediatorSubscriberBase
         {
             track.Absorb = false;
             track.Baseline = bytes;
+            track.LastKnown = value;
             if(!force)
                 return false;
         }
@@ -1144,6 +1163,8 @@ public class SceneSyncService : MediatorSubscriberBase
             return false;
 
         track.Baseline = bytes;
+        track.LastKnown = value;
+        track.LastLocalChange = now;
         item.Parts[part] = value;
         track.Revision++;
         track.Writer = _me;
