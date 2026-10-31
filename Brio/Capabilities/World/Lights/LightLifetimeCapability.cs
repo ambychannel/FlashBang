@@ -43,6 +43,7 @@ public class LightLifetimeCapability : LightCapability
         if(!CanDestroy)
             return;
 
+        Entity.NotifyDeletedByUser();
         _lightingService.Destroy(GameLight);
     }
 

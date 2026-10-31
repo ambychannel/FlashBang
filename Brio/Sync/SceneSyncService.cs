@@ -54,6 +54,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan SettleTime = TransformMotion.Duration + TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
 
     private readonly EntityManager _entityManager;
     private readonly GPoseService _gPoseService;
@@ -89,6 +90,11 @@ public class SceneSyncService : MediatorSubscriberBase
     // Objects waiting to be torn down, one per frame.
     private readonly Queue<SyncItem> _despawns = new();
     private readonly HashSet<FolderEntity> _orphanFolders = [];
+
+    // Entities the player just deleted from the UI. Only these count as deletes; anything else
+    // that disappears (a scene load, the game dropping it) just comes back.
+    private readonly Dictionary<EntityId, DateTime> _deletedByUser = [];
+    private EntityId? _syncFolderId;
 
     public SyncStatus Status { get; private set; } = SyncStatus.Offline;
     public string? RoomCode { get; private set; }
@@ -131,6 +137,7 @@ public class SceneSyncService : MediatorSubscriberBase
         _modCache = modCache;
 
         Mediator.Subscribe<FrameworkUpdateMessage>(this, _ => OnFrameworkUpdate());
+        Mediator.Subscribe<EntityDeletedByUserMessage>(this, m => _deletedByUser[m.Id] = DateTime.UtcNow);
         _gPoseService.OnGPoseStateChange += OnGPoseChanged;
     }
 
@@ -642,6 +649,12 @@ public class SceneSyncService : MediatorSubscriberBase
 
     private void Reconcile(DateTime now)
     {
+        foreach(var (id, at) in _deletedByUser)
+        {
+            if(now - at > DeleteWindow)
+                _deletedByUser.Remove(id);
+        }
+
         var gposing = _gPoseService.IsGPosing;
         List<SyncItem>? deleted = null;
 
@@ -653,22 +666,19 @@ public class SceneSyncService : MediatorSubscriberBase
                 && (item.Mine || !kind.NeedsSameTerritory || item.Territory == _clientState.TerritoryType)
                 && kind.CanShow(item);
 
-            var alive = item.Entity is not null && SafeIsAlive(item);
-            if(item.Entity is not null && !alive)
+            if(item.Entity is not null && !SafeIsAlive(item))
             {
-                if(canShow && !item.Mine)
+                // Deleted by the player: gone for everyone. Our own thing that was never shared has
+                // nothing to come back from, and nobody else knows about it.
+                if(_deletedByUser.Remove(item.Entity.Id) || (item.Mine && !item.Shared))
                 {
-                    // Deleted on our side: delete it for everyone.
                     (deleted ??= []).Add(item);
                     continue;
                 }
 
-                // Gone with GPose or the zone; it comes back when it can be shown. Our own
-                // items are handled in Capture.
-                if(!item.Mine)
-                    ForgetEntity(item);
-                else
-                    continue;
+                // Lost some other way. Nobody asked for that, so it just comes back.
+                ForgetEntity(item);
+                item.NextAttempt = now + RetryDelay;
             }
 
             if(item.Spawning && now - item.SpawnStarted > SpawnTimeout)
@@ -678,8 +688,7 @@ public class SceneSyncService : MediatorSubscriberBase
                 item.NextAttempt = now + RetryDelay;
             }
 
-            // Our own things are only ever re-created after GPose took them away, and only
-            // if they were shared.
+            // Our own things are only re-created if they were shared.
             if(item.Mine && item.Entity is null && !item.Shared)
                 continue;
 
@@ -753,7 +762,8 @@ public class SceneSyncService : MediatorSubscriberBase
         {
             foreach(var item in deleted)
             {
-                Broadcast([new SyncOp { Kind = SyncOpKind.Remove, SyncId = item.Id, Type = item.Kind.Type }]);
+                if(!item.Mine || item.Shared)
+                    Broadcast([new SyncOp { Kind = SyncOpKind.Remove, SyncId = item.Id, Type = item.Kind.Type }]);
                 ForgetEntity(item);
                 item.Removed = true;
                 _items.Remove(item.Id);
@@ -1042,8 +1052,12 @@ public class SceneSyncService : MediatorSubscriberBase
 
         _modSource.Keep(seen);
 
-        // Our things that left the Sync folder or were deleted.
-        foreach(var item in _items.Values.Where(i => i.Mine && !i.Spawning && i.Entity is not null && !seen.Contains(i.Entity.Id)).ToList())
+        // Our things that were taken out of the Sync folder. Reconcile deals with any that died. A
+        // missing folder only counts if the player deleted it: a scene load removes it too.
+        var folderIsTrustworthy = folder is not null || (_syncFolderId is { } folderId && _deletedByUser.ContainsKey(folderId));
+        _syncFolderId = folder?.Id ?? _syncFolderId;
+
+        foreach(var item in _items.Values.Where(i => folderIsTrustworthy && i.Mine && !i.Spawning && i.Entity is not null && !seen.Contains(i.Entity.Id) && SafeIsAlive(i)).ToList())
         {
             if(item.Shared)
                 Broadcast([new SyncOp { Kind = SyncOpKind.Remove, SyncId = item.Id, Type = item.Kind.Type }]);

@@ -20,6 +20,7 @@ public class WorldObjectLifetimeCapability : WorldObjectCapability
     public void Destroy()
     {
         if(!CanDestroy) return;
+        Entity.NotifyDeletedByUser();
         _bgObjectService.Destroy(GameBgObject);
     }
 

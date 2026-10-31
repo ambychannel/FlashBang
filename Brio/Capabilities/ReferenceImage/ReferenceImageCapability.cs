@@ -44,7 +44,10 @@ public class ReferenceImageCapability : Capability
     }
 
     public void Destroy()
-        => _service.Destroy(ReferenceImageEntity);
+    {
+        Entity.NotifyDeletedByUser();
+        _service.Destroy(ReferenceImageEntity);
+    }
 
     public override void Dispose()
     {

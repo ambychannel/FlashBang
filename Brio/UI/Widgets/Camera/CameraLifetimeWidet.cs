@@ -36,6 +36,7 @@ public class CameraLifetimeWidget(CameraLifetimeCapability capability) : Widget<
             {
                 if(ImBrio.HoldButton("CameraLifetime_destroy", "", FontAwesomeIcon.Trash, 1f, centerTest: true, tooltip: "[HOLD TO DESTROY]", onlyIcon: true))
                 {
+                    Capability.Entity.NotifyDeletedByUser();
                     Capability.VirtualCameraManager.DestroyCamera(Capability.CameraEntity.CameraID);
                 }
 
@@ -101,6 +102,7 @@ public class CameraLifetimeWidget(CameraLifetimeCapability capability) : Widget<
             {
                 if(ImGui.MenuItem("Confirm Destruction###CameraLifetime_destroy_confirm"))
                 {
+                    Capability.Entity.NotifyDeletedByUser();
                     Capability.VirtualCameraManager.DestroyCamera(Capability.CameraEntity.CameraID);
                 }
 

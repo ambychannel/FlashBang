@@ -93,12 +93,15 @@ public class ActorLifetimeCapability : ActorCapability
     {
         if(Entity.SpawnFlag.HasFlag(SpawnFlags.WorldActor))
         {
+            Entity.NotifyDeletedByUser();
             _entityManager.DetachEntity(Actor, true);
             return;
         }
 
         if(!CanDestroy)
             return;
+
+        Entity.NotifyDeletedByUser();
 
         if(Actor.Parent is EntityManagerContainer or FolderEntity)
             _actorSpawnService.DestroyObject(GameObject);

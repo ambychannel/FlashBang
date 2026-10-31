@@ -39,6 +39,8 @@ public class FolderCapability : Capability
 
     public void DeleteFolderReturnChildren()
     {
+        FolderEntity.NotifyDeletedByUser();
+
         var parent = FolderEntity.Parent;
         if(parent == null) return;
 
@@ -58,6 +60,8 @@ public class FolderCapability : Capability
 
     public void DeleteFolderDestroyChildren()
     {
+        FolderEntity.NotifyDeletedByUser();
+
         var childCopy = new List<Entity>(FolderEntity.Children);
         DestroyChildren(childCopy);
 
@@ -68,6 +72,8 @@ public class FolderCapability : Capability
     {
         foreach(var child in children)
         {
+            child.NotifyDeletedByUser();
+
             // this is hacky
             try
             {

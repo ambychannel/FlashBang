@@ -21,3 +21,7 @@ public record ActorSpawnedMessage(IGameObject GameObject) : MessageBase;
 public record ActorDespawnedMessage(IGameObject GameObject) : MessageBase;
 
 public record EntityStateCommittedMessage(EntityId Id) : SameThreadMessage;
+
+// The player asked for this entity to be deleted, from the UI. Scene loads, Destroy All and the
+// game dropping something don't send this.
+public record EntityDeletedByUserMessage(EntityId Id) : SameThreadMessage;

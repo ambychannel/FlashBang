@@ -1,6 +1,7 @@
 ﻿using Brio.Capabilities.Core;
 using Brio.Game.Actor;
 using Dalamud.Interface;
+using Brio.Services.MediatorMessages;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
@@ -19,6 +20,10 @@ public abstract class Entity : IDisposable
     public EntityManager EntityManager { get { field ??= _serviceProvider.GetRequiredService<EntityManager>(); return field; } } // I love .net10
 
     public EntityId Id { get; private set; }
+
+    // Call just before a delete the player asked for, so others can tell it from any other loss.
+    public void NotifyDeletedByUser() => EntityManager.Mediator.Publish(new EntityDeletedByUserMessage(Id));
+
     public Entity? Parent { get; protected set; }
     public SpawnFlags SpawnFlag { get; protected set; }
 
