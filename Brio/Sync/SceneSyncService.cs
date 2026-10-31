@@ -280,6 +280,83 @@ public class SceneSyncService : MediatorSubscriberBase
             item.SyncNowRequested = true;
     }
 
+    // Puts an MCDF on any actor in the Sync folder. Everyone syncing gets the file and loads it.
+    public void ApplyMcdf(SyncItem item, string path)
+    {
+        if(item.Kind is not ActorSyncKind kind)
+            return;
+
+        var name = System.IO.Path.GetFileNameWithoutExtension(path);
+        item.Status = $"Reading MCDF {name}...";
+
+        Task.Run(async () =>
+        {
+            string? problem = null;
+            SyncLookSource? look = null;
+
+            try
+            {
+                var info = new System.IO.FileInfo(path);
+                if(info.Length > SyncModLimits.MaxMcdfBytes)
+                    problem = "That MCDF is too large to share.";
+                else if(!await kind.IsSafeMcdf(path))
+                    problem = "That file isn't an MCDF that can be shared.";
+                else
+                {
+                    string hash;
+                    using(var stream = info.OpenRead())
+                        hash = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(stream)).ToLowerInvariant();
+
+                    _modSource.Offer(hash, _modCache.AddCopy(hash, ".mcdf", path, info.Length));
+                    look = new SyncLookSource { McdfHash = hash, Size = info.Length, Name = name.Length > 64 ? name[..64] : name };
+                }
+            }
+            catch(Exception ex)
+            {
+                Brio.Log.Warning(ex, "FlashBang: couldn't read an MCDF.");
+                problem = "That MCDF couldn't be read.";
+            }
+
+            await _framework.RunOnFrameworkThread(() =>
+            {
+                if(item.Removed)
+                    return;
+
+                if(look is null)
+                {
+                    item.Status = problem;
+                    Brio.PopToast(problem ?? "That MCDF couldn't be read.", "FlashBang Sync", NotificationType.Warning);
+                    return;
+                }
+
+                SendLook(item, look);
+            });
+        });
+    }
+
+    // Goes back to the actor's normal look: the creator's own mods.
+    public void ClearMcdf(SyncItem item) => SendLook(item, new SyncLookSource());
+
+    public bool HasMcdf(SyncItem item)
+        => item.Parts.TryGetValue(ActorSyncKind.LookPart, out var look) && ((SyncLookSource)look).McdfHash is not null;
+
+    private void SendLook(SyncItem item, SyncLookSource look)
+    {
+        var track = item.Tracks[ActorSyncKind.LookPart];
+        track.Revision++;
+        track.Writer = _me;
+        track.LastKnown = look;
+        item.Parts[ActorSyncKind.LookPart] = look;
+        item.Dirty.Add(ActorSyncKind.LookPart);
+
+        // An actor nobody has yet needs sharing first, or there's nothing to put it on.
+        if(item.Mine)
+            item.SyncNowRequested = true;
+
+        var bytes = item.Kind.EncodeWire(ActorSyncKind.LookPart, look);
+        Broadcast(SyncCodec.Split(item.Id, item.Kind.Type, ActorSyncKind.LookPart, item.Territory, track.Revision, bytes));
+    }
+
     // Deletes the item for everyone. Works on anything in the Sync folder, even if we lost
     // track of it.
     public void Delete(Entity entity)
@@ -329,6 +406,8 @@ public class SceneSyncService : MediatorSubscriberBase
             {
                 if(part is SyncActorMods mods)
                     inUse.UnionWith(mods.Files.Select(f => f.Hash));
+                else if(part is SyncLookSource { McdfHash: { } mcdf })
+                    inUse.Add(mcdf);
             }
         }
         return inUse;

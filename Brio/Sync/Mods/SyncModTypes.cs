@@ -40,7 +40,8 @@ public class SyncModSwap
 
 public static class SyncModLimits
 {
-    public const long MaxFileBytes = 64L * 1024 * 1024;
+    public const long MaxFileBytes = 256L * 1024 * 1024;
+    public const long MaxMcdfBytes = 2048L * 1024 * 1024;
     public const long MaxActorBytes = 1536L * 1024 * 1024;
     public const int MaxFiles = 4096;
     public const int MaxGamePathsPerFile = 64;
@@ -58,6 +59,7 @@ public static class SyncModLimits
 
     public static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(30);
     public const int MaxAttempts = 3;
+    public static readonly TimeSpan RetryFailedAfter = TimeSpan.FromMinutes(1);
 
     public static readonly string[] AllowedExtensions =
         [".mdl", ".tex", ".mtrl", ".sklb", ".skp", ".pbd", ".phyb", ".pap", ".tmb", ".avfx", ".atex", ".eid", ".scd", ".shpk"];

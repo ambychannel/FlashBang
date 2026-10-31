@@ -923,6 +923,16 @@ public class FileUIHelpers
                 }, ConfigurationService.Instance.Configuration.LastExportPath, true);
     }
 
+    public static void ShowSyncMCDFModal(Action<string> onPicked)
+    {
+        UIManager.Instance.FileDialogManager.OpenFileDialog("Apply MCDF File###sync_mcdf_window", "Mare Character Data File (*.mcdf){.mcdf}",
+                 (success, paths) =>
+                 {
+                     if(success && paths.Count == 1)
+                         onPicked(paths[0]);
+                 }, 1, ConfigurationService.Instance.Configuration.LastMCDFPath, true);
+    }
+
     public static void ShowImportMCDFModal(ActorAppearanceCapability capability)
     {
         UIManager.Instance.FileDialogManager.OpenFileDialog("Import MCDF File###import_mcdf_window", "Mare Character Data File (*.mcdf){.mcdf}",

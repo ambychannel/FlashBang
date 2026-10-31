@@ -80,3 +80,13 @@ public class SyncReferenceImageView
     public float Rotation { get; set; }
     public Vector2 PanOffset { get; set; }
 }
+
+// Where an actor's look comes from: the creator's own mods, or an MCDF someone applied to it.
+[Serializable]
+[MessagePackObject(keyAsPropertyName: true)]
+public class SyncLookSource
+{
+    public string? McdfHash { get; set; }
+    public long Size { get; set; }
+    public string Name { get; set; } = "";
+}

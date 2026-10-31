@@ -31,6 +31,9 @@ public class SyncModSource(PenumbraService penumbraService, CustomizePlusService
     // hash -> local file, for everything we currently share. Read from the transfer thread.
     private volatile Dictionary<string, string> _served = [];
 
+    // Whole MCDF files in use, also offered to linked players by hash.
+    private readonly Dictionary<string, string> _extraFiles = [];
+
     public bool IsAvailable => penumbraService.IsAvailable;
 
     // Framework thread. Returns the latest known list, rebuilding it in the background now and then.
@@ -83,6 +86,13 @@ public class SyncModSource(PenumbraService penumbraService, CustomizePlusService
     }
 
     public bool TryGetPath(string hash, out string path) => _served.TryGetValue(hash, out path!);
+
+    public void Offer(string hash, string path)
+    {
+        lock(_actors)
+            _extraFiles[hash] = path;
+        RebuildServed();
+    }
 
     private void Start(ActorEntity actor, Entry entry)
     {
@@ -215,7 +225,11 @@ public class SyncModSource(PenumbraService penumbraService, CustomizePlusService
         var served = new Dictionary<string, string>();
         List<Entry> entries;
         lock(_actors)
+        {
             entries = [.. _actors.Values];
+            foreach(var (hash, path) in _extraFiles)
+                served[hash] = path;
+        }
 
         foreach(var entry in entries)
         {

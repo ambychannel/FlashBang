@@ -476,6 +476,15 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
 
             if(ImGui.MenuItem("Live sync", "", item.Live))
                 sync.SetLive(item, !item.Live);
+
+            if(item.Kind is Sync.Kinds.ActorSyncKind)
+            {
+                if(ImGui.MenuItem("Apply MCDF..."))
+                    FileUIHelpers.ShowSyncMCDFModal(path => sync.ApplyMcdf(item, path));
+
+                if(sync.HasMcdf(item) && ImGui.MenuItem("Back to the creator's look"))
+                    sync.ClearMcdf(item);
+            }
         }
 
         if(ImGui.MenuItem(item is null || item.Mine && !item.Shared ? "Delete" : "Delete for everyone"))

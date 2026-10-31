@@ -34,13 +34,16 @@ public class ActorSyncKind(
     PosingService posingService,
     SyncModSource modSource,
     SyncModTransfer modTransfer,
-    SyncModApplier modApplier) : SyncKind
+    SyncModApplier modApplier,
+    SyncModCache modCache,
+    MCDF.Game.Services.MCDFService mcdfService) : SyncKind
 {
     private const byte AppearancePart = 0;
     private const byte PosePart = 1;
     private const byte ModsPart = 2;
     private const byte AnimPart = 3;
     private const byte EditsPart = 4;
+    public const byte LookPart = 5;
 
     // How far a playing animation may stray from where it should be, and how often that's checked.
     private const float DriftSeconds = 0.25f;
@@ -51,7 +54,7 @@ public class ActorSyncKind(
 
     public override SyncEntityType Type => SyncEntityType.Actor;
     public override int MaxPerPlayer => SyncLimits.MaxActorsPerPlayer;
-    public override byte PartCount => 5;
+    public override byte PartCount => 6;
 
     public override TimeSpan CaptureInterval(byte part) => part switch
     {
@@ -71,6 +74,8 @@ public class ActorSyncKind(
 
         public SyncModApplier.Applied? Mods { get; set; }
         public SyncActorMods? ModsShown { get; set; }
+        public int ModsFailed { get; set; }
+        public string? LookShown { get; set; }
         public DateTime NextModCheck { get; set; }
 
         // Whether a pose has been applied yet; the first one snaps into place.
@@ -90,7 +95,9 @@ public class ActorSyncKind(
         var actor = (ActorEntity)item.Entity!;
         return part switch
         {
-            AppearancePart => CaptureAppearance(actor),
+            // An MCDF's look isn't ours to read back, and it's sent as a file. See UpdateLook.
+            AppearancePart => HasMcdf(item) ? null : CaptureAppearance(actor),
+            LookPart => null,
             // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
             PosePart => CaptureWholePose(item, actor),
             AnimPart => CaptureAnim(item, actor),
@@ -270,6 +277,9 @@ public class ActorSyncKind(
 
     private SyncActorMods? CaptureMods(SyncItem item, ActorEntity actor)
     {
+        if(HasMcdf(item))
+            return null;
+
         if(!modSource.IsAvailable)
         {
             item.Status = "Mods aren't shared: Penumbra isn't available.";
@@ -408,6 +418,7 @@ public class ActorSyncKind(
         PosePart => SyncCodec.Encode((SyncActorPose)value),
         AnimPart => SyncCodec.Encode((SyncAnimState)value),
         EditsPart => SyncCodec.Encode((SyncActorEdits)value),
+        LookPart => SyncCodec.Encode((SyncLookSource)value),
         _ => SyncCodec.Encode((SyncActorMods)value),
     };
 
@@ -415,6 +426,12 @@ public class ActorSyncKind(
 
     public override object? Decode(byte part, byte[] compressed)
     {
+        if(part == LookPart)
+        {
+            var look = SyncCodec.Decode<SyncLookSource>(compressed, SyncLimits.MaxPartBytes);
+            return look is not null && SyncValidation.IsValid(look) ? look : null;
+        }
+
         if(part == AnimPart)
         {
             var anim = SyncCodec.Decode<SyncAnimState>(compressed, SyncLimits.MaxPartBytes);
@@ -510,7 +527,14 @@ public class ActorSyncKind(
         var entity = (ActorEntity)item.Entity!;
         var state = (SpawnedState)item.State!;
 
-        if(item.Dirty.Remove(AppearancePart))
+        if(item.Dirty.Contains(LookPart))
+        {
+            UpdateLook(item, entity, state);
+            if(item.Busy)
+                return;
+        }
+
+        if(item.Dirty.Remove(AppearancePart) && !HasMcdf(item))
         {
             var appearance = (SyncActorAppearance)item.Parts[AppearancePart];
 
@@ -547,16 +571,153 @@ public class ActorSyncKind(
         if(item.Dirty.Remove(EditsPart) && item.Parts.TryGetValue(EditsPart, out var editsValue))
             ApplyEdits(item, entity, state, (SyncActorEdits)editsValue);
 
-        if(item.Dirty.Remove(ModsPart) && !item.Mine && item.Parts.TryGetValue(ModsPart, out var modsValue))
+        if(item.Dirty.Remove(ModsPart) && !item.Mine && !HasMcdf(item) && item.Parts.TryGetValue(ModsPart, out var modsValue))
             UpdateMods(item, entity, state, (SyncActorMods)modsValue);
     }
+
+    private static bool HasMcdf(SyncItem item)
+        => item.Parts.TryGetValue(LookPart, out var look) && ((SyncLookSource)look).McdfHash is not null;
+
+    // Fetches an MCDF someone applied, if we don't have it, and loads it on this actor. Whoever
+    // applied one last decides the look, until someone goes back to the creator's own.
+    private void UpdateLook(SyncItem item, ActorEntity entity, SpawnedState state)
+    {
+        var look = (SyncLookSource)item.Parts[LookPart];
+
+        if(look.McdfHash == state.LookShown)
+        {
+            item.Dirty.Remove(LookPart);
+            return;
+        }
+
+        var appearance = entity.GetCapability<ActorAppearanceCapability>();
+        var generation = item.Generation;
+
+        if(look.McdfHash is null)
+        {
+            item.Dirty.Remove(LookPart);
+            state.LookShown = null;
+            state.ModsShown = null;
+            item.Status = null;
+            item.Busy = true;
+
+            _ = appearance.ResetAppearance().ContinueWith(_ => framework.RunOnFrameworkThread(() =>
+            {
+                if(!item.IsCurrent(generation))
+                    return;
+
+                item.Busy = false;
+                item.MarkAllDirty();
+                item.Dirty.Remove(LookPart);
+                if(item.Mine)
+                    modSource.Refresh(entity);
+            }));
+            return;
+        }
+
+        if(DateTime.UtcNow < state.NextModCheck)
+            return;
+        state.NextModCheck = DateTime.UtcNow + ModCheckInterval;
+
+        var file = new SyncActorMods { Files = [new SyncModFile { Hash = look.McdfHash, Size = look.Size, GamePaths = ["look.mcdf"] }] };
+        var progress = modTransfer.Want(item.Tracks[LookPart].Writer, file);
+
+        if(!progress.Done)
+        {
+            item.Status = modTransfer.RelayRejectsFiles
+                ? "The relay needs updating for mod transfer."
+                : $"Downloading MCDF: {progress.HaveBytes / 1048576}/{Math.Max(1, progress.TotalBytes / 1048576)} MB.";
+            return;
+        }
+
+        if(progress.FailedFiles > 0)
+        {
+            item.Status = "Couldn't download the MCDF. Trying again in a minute.";
+            return;
+        }
+
+        if(appearance.IsSelf)
+        {
+            item.Dirty.Remove(LookPart);
+            item.Status = "An MCDF can't go on your own character. Use a spawned actor.";
+            return;
+        }
+
+        // Only one can load at a time, across all actors.
+        if(appearance.IsAnyMCDFLoading)
+            return;
+
+        item.Dirty.Remove(LookPart);
+        item.Busy = true;
+        item.Status = $"Loading MCDF {look.Name}...";
+
+        _ = LoadLook(item, entity, state, look, appearance).ContinueWith(task => framework.RunOnFrameworkThread(() =>
+        {
+            if(!item.IsCurrent(generation))
+                return;
+
+            item.Busy = false;
+            state.LookShown = look.McdfHash;
+            item.Status = task.IsCompletedSuccessfully && task.Result ? $"Look from MCDF {look.Name}." : "That MCDF couldn't be loaded.";
+
+            // Loading one redraws the actor.
+            item.Dirty.Add(AnimPart);
+            item.Dirty.Add(EditsPart);
+        }));
+    }
+
+    private async Task<bool> LoadLook(SyncItem item, ActorEntity entity, SpawnedState state, SyncLookSource look, ActorAppearanceCapability appearance)
+    {
+        if(!modCache.TryGet(look.McdfHash!, out var path) || !await IsSafeMcdf(path))
+            return false;
+
+        modSource.Offer(look.McdfHash!, path);
+        return await appearance.LoadMCDF(path) == global::Brio.API.BrioApiResult.Success;
+    }
+
+    // Reads the file's header off the framework thread, and checks what it names is harmless.
+    public Task<bool> IsSafeMcdf(string path) => Task.Run(async () =>
+    {
+        try
+        {
+            var (header, _) = await mcdfService.LoadFileHeader(path);
+            return SyncValidation.IsSafe(header.CharaFileData);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, "FlashBang: an MCDF couldn't be read.");
+            return false;
+        }
+    });
 
     // Fetches whatever files are missing, then swaps the actor over to the owner's mods. Until
     // then it keeps its Glamourer look and shows download progress.
     private void UpdateMods(SyncItem item, ActorEntity entity, SpawnedState state, SyncActorMods mods)
     {
+        // Shown already. If some files didn't make it, keep trying for them now and then.
         if(ReferenceEquals(mods, state.ModsShown))
-            return;
+        {
+            if(state.ModsFailed == 0)
+                return;
+
+            if(DateTime.UtcNow >= state.NextModCheck)
+            {
+                state.NextModCheck = DateTime.UtcNow + ModCheckInterval;
+                var retry = modTransfer.Want(item.Creator!.Id, mods);
+                if(!retry.Done || retry.FailedFiles >= state.ModsFailed)
+                {
+                    item.Dirty.Add(ModsPart);
+                    return;
+                }
+
+                state.ModsShown = null;
+            }
+            else
+            {
+                item.Dirty.Add(ModsPart);
+                return;
+            }
+        }
 
         if(!modApplier.IsAvailable)
         {
@@ -609,6 +770,9 @@ public class ActorSyncKind(
 
             state.Mods = applied;
             state.ModsShown = mods;
+            state.ModsFailed = progress.FailedFiles;
+            if(progress.FailedFiles > 0)
+                item.Dirty.Add(ModsPart);
             item.Status = mods.Files.Count == 0
                 ? "Their actor has no modded files."
                 : progress.FailedFiles > 0

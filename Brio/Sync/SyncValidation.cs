@@ -219,6 +219,41 @@ public static class SyncValidation
         return true;
     }
 
+    public static bool IsValid(SyncLookSource dto)
+        => (dto.Name?.Length ?? 0) <= MaxNameLength
+        && (dto.McdfHash is null || (IsHash(dto.McdfHash) && dto.Size > 0 && dto.Size <= Mods.SyncModLimits.MaxMcdfBytes));
+
+    // An MCDF names the files it unpacks and what they replace. Brio builds file paths from those
+    // names, so one from another player is only used if they can't point anywhere they shouldn't.
+    public static bool IsSafe(MCDF.API.Data.MareCharaFileData data)
+    {
+        foreach(var file in data.Files)
+        {
+            if(string.IsNullOrEmpty(file.Hash) || file.Hash.Length > 128 || !file.Hash.All(char.IsAsciiHexDigit) || file.Length < 0)
+                return false;
+
+            foreach(var path in file.GamePaths)
+            {
+                if(!IsGamePath(path))
+                    return false;
+            }
+        }
+
+        foreach(var swap in data.FileSwaps)
+        {
+            if(!IsGamePath(swap.FileSwapPath))
+                return false;
+
+            foreach(var path in swap.GamePaths)
+            {
+                if(!IsGamePath(path))
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
     public static bool IsValid(SyncActorPose dto)
         => IsValid(dto.Body) && (dto.Companion is null || IsValid(dto.Companion));
 

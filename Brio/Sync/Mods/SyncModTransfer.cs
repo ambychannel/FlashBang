@@ -32,6 +32,7 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
         public FileStream? Stream { get; set; }
         public DateTime LastActivity { get; set; } = DateTime.UtcNow;
         public int Attempts { get; set; }
+        public DateTime FailedAt { get; set; }
     }
 
     private readonly object _lock = new();
@@ -126,6 +127,11 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
 
                 switch(download.State)
                 {
+                    case DownloadState.Failed when DateTime.UtcNow - download.FailedAt > SyncModLimits.RetryFailedAfter:
+                        download.State = DownloadState.Waiting;
+                        download.Attempts = 0;
+                        done = false;
+                        break;
                     case DownloadState.Failed:
                         failed++;
                         break;
@@ -247,6 +253,7 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
                         {
                             Abort(download);
                             download.State = DownloadState.Failed;
+                            download.FailedAt = DateTime.UtcNow;
                         }
                     }
                 }
@@ -315,7 +322,15 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
                 download.Stream ??= new FileStream(cache.TempPathFor(hash), FileMode.Create, FileAccess.ReadWrite, FileShare.None);
                 download.Stream.Write(data);
                 download.Received += data.Length;
-                download.LastActivity = DateTime.UtcNow;
+                // The owner sends one file at a time, so a file further down the list is waiting its
+                // turn, not stuck. Any chunk from them means they're all still on their way.
+                var heard = DateTime.UtcNow;
+                foreach(var other in _downloads.Values)
+                {
+                    if(other.Owner == from)
+                        other.LastActivity = heard;
+                }
+
 
                 if(download.Received < download.Size)
                     return;
@@ -394,6 +409,7 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
         Abort(download);
         download.Attempts++;
         download.State = download.Attempts >= SyncModLimits.MaxAttempts ? DownloadState.Failed : DownloadState.Waiting;
+        download.FailedAt = DateTime.UtcNow;
     }
 
     // Must hold _lock.

@@ -90,6 +90,14 @@ public class SyncModCache
         return finalPath;
     }
 
+    // Keeps a copy of a file we already have, under its hash. Not on the framework thread.
+    public string AddCopy(string hash, string extension, string sourcePath, long size)
+    {
+        var temp = TempPathFor(hash);
+        File.Copy(sourcePath, temp, true);
+        return Add(hash, extension, temp, size);
+    }
+
     // Drops the least recently used files until the cache fits, keeping anything in use.
     public void Trim(IReadOnlySet<string> inUse)
     {
@@ -148,7 +156,7 @@ public class SyncModCache
         foreach(var file in new DirectoryInfo(_folder).EnumerateFiles())
         {
             var hash = Path.GetFileNameWithoutExtension(file.Name);
-            if(file.Extension == ".part" || !SyncValidation.IsHash(hash) || !SyncModLimits.AllowedExtensions.Contains(file.Extension))
+            if(file.Extension == ".part" || !SyncValidation.IsHash(hash) || (file.Extension != ".mcdf" && !SyncModLimits.AllowedExtensions.Contains(file.Extension)))
             {
                 TryDelete(file.FullName);
                 continue;
