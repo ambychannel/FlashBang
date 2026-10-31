@@ -1,3 +1,4 @@
+using Brio.Core;
 using Brio.Entities;
 using Brio.Entities.Core;
 using Brio.Entities.WorldObjects;
@@ -41,9 +42,60 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
 
         // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
         if(item.Motion is TransformMotion motion)
-            dto.Transform = motion.To;
+            dto.Transform = motion.Final(dto.Transform);
 
         return new SyncWorldObject { Object = dto, IsVisible = worldObject.GameBgObject.IsVisible };
+    }
+
+    public override bool UsesValues(byte part) => true;
+
+    public override SyncValues ToValues(byte part, object value)
+    {
+        var dto = (SyncWorldObject)value;
+        var o = dto.Object;
+        var t = o.Transform;
+        var color = o.Color ?? Vector4.Zero;
+        var prop = o.PropModel;
+        return new SyncValues(
+            [t.Position.X, t.Position.Y, t.Position.Z, t.Scale.X, t.Scale.Y, t.Scale.Z, color.X, color.Y, color.Z, color.W],
+            [t.Rotation],
+            [dto.IsVisible ? "1" : "0", o.FriendlyName, o.Path, ((int)o.ObjectType).ToString(), o.StainID.ToString(), o.Color.HasValue ? "1" : "0",
+             prop is null ? null : $"{prop.ModelId},{prop.ModelType},{prop.ModelVariant},{prop.Stain0},{prop.Stain1},{prop.AnimationVariant}"]);
+    }
+
+    public override object? FromValues(byte part, SyncValues values)
+    {
+        var (n, r, c) = (values.Numbers, values.Rotations, values.Choices);
+        if(n.Length != 10 || r.Length != 1 || c.Length != 7 || !int.TryParse(c[3], out var type) || !uint.TryParse(c[4], out var stain))
+            return null;
+
+        PropModelDTO? prop = null;
+        if(c[6] is { } propText)
+        {
+            var bits = propText.Split(',');
+            if(bits.Length != 6 || !ushort.TryParse(bits[0], out var id) || !ushort.TryParse(bits[1], out var modelType) || !ushort.TryParse(bits[2], out var variant)
+                || !byte.TryParse(bits[3], out var stain0) || !byte.TryParse(bits[4], out var stain1) || !byte.TryParse(bits[5], out var animation))
+                return null;
+
+            prop = new PropModelDTO { ModelId = id, ModelType = modelType, ModelVariant = variant, Stain0 = stain0, Stain1 = stain1, AnimationVariant = animation };
+        }
+
+        var dto = new SyncWorldObject
+        {
+            IsVisible = c[0] == "1",
+            Object = new WorldObjectDTO
+            {
+                Transform = new Transform { Position = new Vector3(n[0], n[1], n[2]), Rotation = r[0], Scale = new Vector3(n[3], n[4], n[5]) },
+                FriendlyName = c[1] ?? "",
+                Path = c[2] ?? "",
+                ObjectType = (WorldObjectType)type,
+                StainID = stain,
+                Color = c[5] == "1" ? new Vector4(n[6], n[7], n[8], n[9]) : null,
+                PropModel = prop,
+            },
+        };
+
+        return SyncValidation.IsValid(dto) ? dto : null;
     }
 
     public override bool IsSame(byte part, object a, object b) => SyncCompare.Near((SyncWorldObject)a, (SyncWorldObject)b);
@@ -140,7 +192,7 @@ public class WorldObjectSyncKind(WorldObjectService worldObjectService, EntityMa
         if(item.Motion is not TransformMotion motion || item.Entity is not WorldObjectEntity entity || !entity.GameBgObject.IsValid)
             return;
 
-        entity.GameBgObject.SetTransform(motion.At(now));
+        entity.GameBgObject.SetTransform(motion.Step(entity.GameBgObject.Transform, now));
 
         if(motion.IsDone(now))
             item.Motion = null;

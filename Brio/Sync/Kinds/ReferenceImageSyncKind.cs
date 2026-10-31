@@ -57,6 +57,32 @@ public class ReferenceImageSyncKind : SyncKind
     public override bool Editable(byte part) => part == ViewPart;
     public override bool AlwaysSent(byte part) => part == ImagePart;
 
+    public override bool UsesValues(byte part) => part == ViewPart;
+
+    public override SyncValues ToValues(byte part, object value)
+    {
+        var v = (SyncReferenceImageView)value;
+        return new SyncValues([v.Opacity, v.Zoom, v.Rotation, v.PanOffset.X, v.PanOffset.Y], [], [v.IsWindowOpen ? "1" : "0"]);
+    }
+
+    public override object? FromValues(byte part, SyncValues values)
+    {
+        var (n, c) = (values.Numbers, values.Choices);
+        if(n.Length != 5 || c.Length != 1)
+            return null;
+
+        var view = new SyncReferenceImageView
+        {
+            Opacity = Math.Clamp(n[0], 0, 1),
+            Zoom = n[1],
+            Rotation = n[2],
+            PanOffset = new System.Numerics.Vector2(n[3], n[4]),
+            IsWindowOpen = c[0] == "1",
+        };
+
+        return SyncValidation.IsValid(view) ? view : null;
+    }
+
     public override object? Capture(SyncItem item, byte part)
     {
         var image = (ReferenceImageEntity)item.Entity!;

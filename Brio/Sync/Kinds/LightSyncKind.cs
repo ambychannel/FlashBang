@@ -1,4 +1,5 @@
 using Brio.Capabilities.World;
+using Brio.Core;
 using Brio.Entities;
 using Brio.Entities.Core;
 using Brio.Entities.World;
@@ -27,11 +28,51 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
 
         // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
         if(item.Motion is TransformMotion motion)
-            dto.Transform = motion.To;
+            dto.Transform = motion.Final(dto.Transform);
 
         dto.FriendlyName = light.RawName;
         dto.IsVisible = light.GameLight.IsVisible;
         return dto;
+    }
+
+    public override bool UsesValues(byte part) => true;
+
+    public override SyncValues ToValues(byte part, object value)
+    {
+        var dto = (LightDTO)value;
+        var t = dto.Transform;
+        return new SyncValues(
+            [t.Position.X, t.Position.Y, t.Position.Z, t.Scale.X, t.Scale.Y, t.Scale.Z,
+             dto.Color.X, dto.Color.Y, dto.Color.Z, dto.Intensity, dto.Range, dto.Falloff,
+             dto.LightAngle, dto.FalloffAngle, dto.CharacterShadowRange, dto.ShadowPlaneNear, dto.ShadowPlaneFar],
+            [t.Rotation],
+            [((int)dto.LightType).ToString(), dto.IsVisible ? "1" : "0", dto.FriendlyName]);
+    }
+
+    public override object? FromValues(byte part, SyncValues values)
+    {
+        var (n, r, c) = (values.Numbers, values.Rotations, values.Choices);
+        if(n.Length != 17 || r.Length != 1 || c.Length != 3 || !int.TryParse(c[0], out var type))
+            return null;
+
+        var dto = new LightDTO
+        {
+            Transform = new Transform { Position = new Vector3(n[0], n[1], n[2]), Rotation = r[0], Scale = new Vector3(n[3], n[4], n[5]) },
+            Color = new Vector3(n[6], n[7], n[8]),
+            Intensity = n[9],
+            Range = n[10],
+            Falloff = n[11],
+            LightAngle = n[12],
+            FalloffAngle = n[13],
+            CharacterShadowRange = n[14],
+            ShadowPlaneNear = n[15],
+            ShadowPlaneFar = n[16],
+            LightType = (Game.World.Interop.LightType)type,
+            IsVisible = c[1] == "1",
+            FriendlyName = c[2] ?? "",
+        };
+
+        return SyncValidation.IsValid(dto) ? dto : null;
     }
 
     public override bool IsSame(byte part, object a, object b) => SyncCompare.Near((LightDTO)a, (LightDTO)b);
@@ -108,7 +149,7 @@ public class LightSyncKind(LightingService lightingService, EntityManager entity
 
         if(entity.TryGetCapability<LightTransformCapability>(out var transform))
         {
-            transform.Transform = motion.At(now);
+            transform.Transform = motion.Step(transform.Transform, now);
             entity.GameLight.GameLight->UpdateTransforms(false);
         }
 

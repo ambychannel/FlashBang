@@ -234,7 +234,7 @@ public class ActorSyncKind(
             Full = true,
 
             // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
-            Model = item.Motion is TransformMotion motion ? motion.To : posing.ModelPosing.Transform,
+            Model = item.Motion is TransformMotion motion ? motion.Final(posing.ModelPosing.Transform) : posing.ModelPosing.Transform,
         };
         ReadBones(posing, edits, false);
 
@@ -374,7 +374,7 @@ public class ActorSyncKind(
     public override object ToWire(byte part, object value, object? last)
         => part == EditsPart ? SyncActorEdits.Diff((SyncActorEdits)value, last as SyncActorEdits) : value;
 
-    public override object Merge(byte part, object wire, object? last, out bool inSync)
+    public override object? Merge(byte part, object wire, object? last, out bool inSync)
     {
         inSync = true;
 
@@ -386,9 +386,15 @@ public class ActorSyncKind(
 
         var received = (SyncActorEdits)wire;
         var merged = SyncActorEdits.Merge(received, last as SyncActorEdits);
-        inSync = merged.Digest == received.Digest;
+        inSync = !received.HasDigest || SyncActorEdits.DigestOf(merged) == received.Digest;
         return merged;
     }
+
+    public override object Rebase(byte part, object current, object from, object to)
+        => part == EditsPart ? SyncActorEdits.Rebase((SyncActorEdits)current, (SyncActorEdits)from, (SyncActorEdits)to) : to;
+
+    public override object Checkpoint(byte part, object known)
+        => part == EditsPart ? SyncActorEdits.Checkpoint((SyncActorEdits)known) : known;
 
     public override byte[]? RepairDigest(byte part, object? known)
         => part == EditsPart ? SyncActorEdits.BoneDigest(known as SyncActorEdits) : null;
@@ -797,7 +803,7 @@ public class ActorSyncKind(
             return;
 
         if(entity.TryGetCapability<PosingCapability>(out var posing))
-            posing.ModelPosing.Transform = motion.At(now);
+            posing.ModelPosing.Transform = motion.Step(posing.ModelPosing.Transform, now);
 
         if(motion.IsDone(now))
             item.Motion = null;

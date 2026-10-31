@@ -56,7 +56,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan LocalChangeWins = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CheckpointDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RepairInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DiscoverInterval = TimeSpan.FromMilliseconds(500);
     private const double SlowUpdateMs = 2;
@@ -652,7 +652,7 @@ public class SceneSyncService : MediatorSubscriberBase
             object? value;
             try
             {
-                value = kind.Decode(op.Part, whole);
+                value = kind.DecodeWire(op.Part, whole);
             }
             catch(Exception ex)
             {
@@ -676,7 +676,10 @@ public class SceneSyncService : MediatorSubscriberBase
             }
 
             var track = item.Tracks[op.Part];
-            if(!op.IsRepair)
+            var diffed = kind.IsDiffed(op.Part);
+
+            // Changes add up, so they don't compete. Only whole values do.
+            if(!op.IsRepair && !diffed)
             {
                 if(!track.IsNewer(op.Revision, peer.Id))
                     continue;
@@ -688,20 +691,30 @@ public class SceneSyncService : MediatorSubscriberBase
             if(!item.Mine && item.Creator == peer)
                 item.Territory = op.Territory;
 
-            // We're changing this right now, and our next update will win.
-            if(item.Mine && item.Live && DateTime.UtcNow - track.LastLocalChange < LocalChangeWins)
+            var before = track.LastKnown;
+            var merged = kind.Merge(op.Part, value, before, out var inSync);
+            if(merged is null)
                 continue;
 
-            value = kind.Merge(op.Part, value, track.LastKnown, out var inSync);
             if(!inSync)
                 RequestRepair(item, op.Part, peer, DateTime.UtcNow);
 
-            // What we already have, give or take noise: nothing to apply.
-            if(track.LastKnown is not null && kind.IsSame(op.Part, value, track.LastKnown))
-                continue;
+            if(item.Mine && diffed)
+                track.CheckpointAt = DateTime.UtcNow + CheckpointDelay;
 
-            track.LastKnown = value;
-            item.Parts[op.Part] = value;
+            // What we already have, give or take noise: nothing to apply.
+            if(before is not null && kind.IsSame(op.Part, merged, before))
+            {
+                if(diffed)
+                    track.LastKnown = merged;
+                continue;
+            }
+
+            if(diffed && !item.Dirty.Contains(op.Part))
+                track.ApplyFrom = before;
+
+            track.LastKnown = merged;
+            item.Parts[op.Part] = merged;
             item.Dirty.Add(op.Part);
         }
     }
@@ -735,7 +748,7 @@ public class SceneSyncService : MediatorSubscriberBase
         if(track.LastKnown is null || item.Kind.RepairAnswer(op.Part, track.LastKnown, op.Data) is not { } answer)
             return;
 
-        var ops = SyncCodec.Split(item.Id, item.Kind.Type, op.Part, item.Territory, track.Revision, item.Kind.Encode(op.Part, answer));
+        var ops = SyncCodec.Split(item.Id, item.Kind.Type, op.Part, item.Territory, track.Revision, item.Kind.EncodeWire(op.Part, answer));
         foreach(var repair in ops)
             repair.IsRepair = true;
 
@@ -835,6 +848,12 @@ public class SceneSyncService : MediatorSubscriberBase
                 continue;
 
             var applying = item.Dirty.ToList();
+            foreach(var part in applying)
+            {
+                if(kind.IsDiffed(part))
+                    RebasePart(item, part);
+            }
+
             try
             {
                 kind.Apply(item);
@@ -868,12 +887,41 @@ public class SceneSyncService : MediatorSubscriberBase
         }
     }
 
+    // Adds what just came in on top of what we have, rather than replacing it, so the player's
+    // own change in progress isn't lost.
+    private static void RebasePart(SyncItem item, byte part)
+    {
+        var track = item.Tracks[part];
+        var (from, to) = (track.ApplyFrom, track.LastKnown);
+        track.ApplyFrom = null;
+
+        if(to is null)
+            return;
+
+        item.Parts[part] = to;
+        if(from is null)
+            return;
+
+        try
+        {
+            if(item.Kind.Capture(item, part) is { } current)
+                item.Parts[part] = item.Kind.Rebase(part, current, from, to);
+        }
+        catch(Exception ex)
+        {
+            Brio.Log.Warning(ex, $"FlashBang: couldn't merge a change to a {item.Kind.Type}.");
+        }
+    }
+
     // After applying someone else's change, the next read becomes the baseline rather than
     // something to send back.
     private static void Settle(SyncItem item, IEnumerable<byte> parts, DateTime now)
     {
         foreach(var part in parts)
         {
+            if(item.Kind.IsDiffed(part))
+                continue;
+
             var track = item.Tracks[part];
             track.Absorb = true;
             track.SettleUntil = now + SettleTime;
@@ -1186,6 +1234,9 @@ public class SceneSyncService : MediatorSubscriberBase
             for(byte part = 0; part < item.Kind.PartCount; part++)
                 sent |= CapturePart(item, part, force, now);
 
+            if(item.Mine && AnyLinked)
+                SendCheckpoints(item, now);
+
             // Pressed on a copy: also make sure we have everything its creator has.
             if(force && item.Creator is { } creator)
             {
@@ -1204,6 +1255,27 @@ public class SceneSyncService : MediatorSubscriberBase
         }
     }
 
+    // Once an item has gone quiet, its creator sends the true values. Changes add up the same
+    // everywhere unless one was lost or rotations landed in a different order, and this puts
+    // that right. Anything someone is changing at that moment is kept (see RebasePart).
+    private void SendCheckpoints(SyncItem item, DateTime now)
+    {
+        for(byte part = 0; part < item.Tracks.Length; part++)
+        {
+            var track = item.Tracks[part];
+            if(track.CheckpointAt == default || now < track.CheckpointAt || track.LastKnown is null)
+                continue;
+
+            track.CheckpointAt = default;
+
+            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, item.Kind.Checkpoint(part, track.LastKnown)));
+            foreach(var op in ops)
+                op.IsRepair = true;
+
+            _outbox.Enqueue(ops, null, false);
+        }
+    }
+
     // Reads one part and sends it if it changed (or if forced). Returns whether it was sent.
     private bool CapturePart(SyncItem item, byte part, bool force, DateTime now)
     {
@@ -1218,6 +1290,10 @@ public class SceneSyncService : MediatorSubscriberBase
 
         var track = item.Tracks[part];
         if(!force && (now < track.NextCapture || now < track.SettleUntil))
+            return false;
+
+        // An update is waiting to be added on top; reading now would look like an undo.
+        if(kind.IsDiffed(part) && item.Dirty.Contains(part))
             return false;
 
         track.NextCapture = now + kind.CaptureInterval(part);
@@ -1240,7 +1316,7 @@ public class SceneSyncService : MediatorSubscriberBase
                 return false;
 
             wire = kind.ToWire(part, value, last);
-            bytes = same && !diffed && track.Baseline is not null ? track.Baseline : kind.Encode(part, wire);
+            bytes = same && !diffed && track.Baseline is not null ? track.Baseline : kind.EncodeWire(part, wire);
         }
         catch(Exception ex)
         {
@@ -1275,9 +1351,10 @@ public class SceneSyncService : MediatorSubscriberBase
         if(!diffed)
             track.Baseline = bytes;
 
-        track.LastKnown = kind.Merge(part, wire, last, out _);
-        track.LastLocalChange = now;
-        item.Parts[part] = track.LastKnown;
+        track.LastKnown = kind.Merge(part, wire, last, out _) ?? value;
+        item.Parts[part] = value;
+        if(diffed && item.Mine)
+            track.CheckpointAt = now + CheckpointDelay;
         track.Revision++;
         track.Writer = _me;
 
@@ -1308,7 +1385,7 @@ public class SceneSyncService : MediatorSubscriberBase
                     continue;
 
                 var kind = item.Kind;
-                var bytes = kind.Encode(part, kind.ToWire(part, track.LastKnown, null));
+                var bytes = kind.EncodeWire(part, kind.ToWire(part, track.LastKnown, null));
                 _outbox.Enqueue(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes), peer.Id, !kind.IsDiffed(part));
             }
         }

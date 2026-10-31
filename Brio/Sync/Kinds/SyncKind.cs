@@ -42,22 +42,61 @@ public abstract class SyncKind
     // False just means "compare the encoded bytes instead".
     public virtual bool IsSame(byte part, object a, object b) => false;
 
-    // What to send for a value, given what was last sent. The whole value by default.
-    public virtual object ToWire(byte part, object value, object? last) => value;
+    // Parts broken into fields (see SyncValues), which travel as how much they changed.
+    public virtual bool UsesValues(byte part) => false;
+    public virtual SyncValues ToValues(byte part, object value) => throw new NotSupportedException();
 
-    // Folds a received (or just sent) update into what we had. inSync is false if the result
-    // doesn't match what the sender has.
-    public virtual object Merge(byte part, object wire, object? last, out bool inSync)
+    // Null if the values don't make a valid item.
+    public virtual object? FromValues(byte part, SyncValues values) => null;
+
+    // What to send for a value, given what was last sent. The whole value by default.
+    public virtual object ToWire(byte part, object value, object? last)
+        => UsesValues(part) ? SyncValues.Diff(ToValues(part, value), last is null ? null : ToValues(part, last)) : value;
+
+    // Folds a received (or just sent) update into what we had. Null if it can't be used. inSync
+    // is false if the result doesn't match what the sender says it has.
+    public virtual object? Merge(byte part, object wire, object? last, out bool inSync)
     {
         inSync = true;
-        return wire;
+
+        if(!UsesValues(part))
+            return wire;
+
+        var delta = (SyncValueDelta)wire;
+        var values = delta.Absolute ? SyncValues.FromAbsolute(delta) : last is null ? null : SyncValues.Apply(ToValues(part, last), delta);
+        return values is null ? null : FromValues(part, values);
     }
 
-    // Parts sent as differences, where every update matters and none can replace another.
-    public virtual bool IsDiffed(byte part) => false;
+    // `current` with the change from `from` to `to` added on top, keeping anything changed
+    // locally and not sent yet.
+    public virtual object Rebase(byte part, object current, object from, object to)
+    {
+        if(!UsesValues(part))
+            return to;
+
+        return FromValues(part, SyncValues.Rebase(ToValues(part, current), ToValues(part, from), ToValues(part, to))) ?? to;
+    }
+
+    // The true value, sent by the creator once things go quiet, to line everyone up.
+    public virtual object Checkpoint(byte part, object known) => ToWire(part, known, null);
+
+    // Parts sent as changes, where every update matters and none can replace another.
+    public virtual bool IsDiffed(byte part) => UsesValues(part);
 
     // Whether Sync now sends this part even if nothing about it changed.
-    public virtual bool SendWhenSame(byte part) => true;
+    public virtual bool SendWhenSame(byte part) => !IsDiffed(part);
+
+    public byte[] EncodeWire(byte part, object wire)
+        => wire is SyncValueDelta delta ? SyncCodec.Encode(delta) : Encode(part, wire);
+
+    public object? DecodeWire(byte part, byte[] compressed)
+    {
+        if(!UsesValues(part))
+            return Decode(part, compressed);
+
+        var delta = SyncCodec.Decode<SyncValueDelta>(compressed, SyncLimits.MaxPartBytes);
+        return delta is not null && delta.IsValid() ? delta : null;
+    }
 
     // A digest of what we have, for asking a player for only what differs.
     public virtual byte[]? RepairDigest(byte part, object? known) => null;
@@ -109,11 +148,15 @@ public class PartTrack
     public bool Absorb { get; set; }
     public DateTime SettleUntil { get; set; }
 
-    // The value last sent or applied: what this part is believed to be for everyone.
+    // The value last sent or applied: what this part is believed to be for everyone. What we have
+    // on top of it is our own change, not sent yet.
     public object? LastKnown { get; set; }
 
-    // When we last sent a change of our own.
-    public DateTime LastLocalChange { get; set; }
+    // What LastKnown was before updates that haven't been applied yet.
+    public object? ApplyFrom { get; set; }
+
+    // When the creator next sends the true value, once things have gone quiet.
+    public DateTime CheckpointAt { get; set; }
 
     public DateTime NextRepair { get; set; }
 
@@ -193,25 +236,39 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
     }
 }
 
-// A transform gliding from where it was to where it's going.
+// A transform gliding by however much an update changed it. Only the change is added, a little
+// each frame, so anything the player is doing to it at the same time still counts.
 public class TransformMotion(Transform from, Transform to, DateTime start)
 {
     public static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(180);
 
-    public Transform From { get; } = from;
-    public Transform To { get; } = to;
-    public DateTime Start { get; } = start;
+    private Transform _reached = from;
 
-    public bool IsDone(DateTime now) => now - Start >= Duration;
+    public bool IsDone(DateTime now) => now - start >= Duration;
 
-    public Transform At(DateTime now)
+    // Where it should be now, given where it is.
+    public Transform Step(Transform current, DateTime now)
     {
-        var t = (float)Math.Clamp((now - Start) / Duration, 0, 1);
-        return new Transform
+        var t = (float)Math.Clamp((now - start) / Duration, 0, 1);
+        var at = new Transform
         {
-            Position = Vector3.Lerp(From.Position, To.Position, t),
-            Rotation = Quaternion.Slerp(From.Rotation, To.Rotation, t),
-            Scale = Vector3.Lerp(From.Scale, To.Scale, t),
+            Position = Vector3.Lerp(from.Position, to.Position, t),
+            Rotation = Quaternion.Slerp(from.Rotation, to.Rotation, t),
+            Scale = Vector3.Lerp(from.Scale, to.Scale, t),
         };
+
+        var next = Add(current, _reached, at);
+        _reached = at;
+        return next;
     }
+
+    // Where it's heading from where it is, so the in-between doesn't look like a change.
+    public Transform Final(Transform current) => Add(current, _reached, to);
+
+    private static Transform Add(Transform current, Transform a, Transform b) => new()
+    {
+        Position = current.Position + (b.Position - a.Position),
+        Rotation = SyncValues.IsSameRotation(a.Rotation, b.Rotation) ? current.Rotation : Quaternion.Normalize(SyncValues.RotationFrom(a.Rotation, b.Rotation) * current.Rotation),
+        Scale = current.Scale + (b.Scale - a.Scale),
+    };
 }

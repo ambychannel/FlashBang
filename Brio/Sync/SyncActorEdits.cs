@@ -3,6 +3,7 @@ using Brio.Game.Posing;
 using MessagePack;
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Brio.Sync;
 
@@ -41,13 +42,17 @@ public class SyncBoneEdit
     public int Partial { get; set; }
     public byte Slot { get; set; }
     public bool Companion { get; set; }
+
+    // In an update, whether the stacks are plain values rather than how much each one changed.
+    public bool Absolute { get; set; } = true;
     public List<SyncBoneStack> Stacks { get; set; } = [];
 
     [IgnoreMember] public uint Key => SyncActorEdits.KeyOf(Name, Partial, Slot, Companion);
 }
 
-// An actor's hand-posed bones and where it stands. Kept whole on each side, sorted by bone key,
-// and sent as just the bones that differ from what was last sent.
+// An actor's hand-posed bones and where it stands. Kept whole on each side, sorted by bone key.
+// Updates hold only how much the bones that changed have changed, so two people moving things at
+// once add up, even on the same bone.
 [Serializable]
 [MessagePackObject(keyAsPropertyName: true)]
 public class SyncActorEdits
@@ -55,11 +60,16 @@ public class SyncActorEdits
     public Transform Model { get; set; } = Transform.Identity;
     public Transform? CompanionModel { get; set; }
 
+    // In an update: plain values rather than how much they changed.
+    public bool ModelAbsolute { get; set; }
+    public bool CompanionAbsolute { get; set; }
+
     public bool Full { get; set; }
     public List<SyncBoneEdit> Bones { get; set; } = [];
     public List<uint> Removed { get; set; } = [];
 
-    // Of the whole set after this update, so the other side can tell if it has fallen out of step.
+    // From a checkpoint: what the creator has, for the receiver to compare with its own.
+    public bool HasDigest { get; set; }
     public ulong Digest { get; set; }
 
     public static uint KeyOf(string name, int partial, byte slot, bool companion)
@@ -84,44 +94,86 @@ public class SyncActorEdits
 
         for(var i = 0; i < a.Bones.Count; i++)
         {
-            if(a.Bones[i].Key != b.Bones[i].Key || !Near(a.Bones[i], b.Bones[i]))
+            if(a.Bones[i].Key != b.Bones[i].Key || !Near(a.Bones[i].Stacks, b.Bones[i].Stacks))
                 return false;
         }
 
         return true;
     }
 
-    public static bool Near(SyncBoneEdit a, SyncBoneEdit b) => Near(a.Stacks, b.Stacks);
-
     private static bool Near(List<SyncBoneStack> a, List<SyncBoneStack> b)
+    {
+        if(!SameShape(a, b))
+            return false;
+
+        for(var i = 0; i < a.Count; i++)
+        {
+            if(!SyncCompare.Near(a[i].Transform, b[i].Transform))
+                return false;
+        }
+
+        return true;
+    }
+
+    // Whether one bone's stacks can be added to the other's, stack by stack.
+    private static bool SameShape(List<SyncBoneStack> a, List<SyncBoneStack> b)
     {
         if(a.Count != b.Count)
             return false;
 
         for(var i = 0; i < a.Count; i++)
         {
-            if(a[i].Propagate != b[i].Propagate || a[i].IK != b[i].IK || !SyncCompare.Near(a[i].Transform, b[i].Transform))
+            if(a[i].Propagate != b[i].Propagate || a[i].IK != b[i].IK)
                 return false;
         }
 
         return true;
     }
 
-    // Just what changed from `last`; everything if there's no `last`.
+    private static Transform Unchanged => new() { Position = Vector3.Zero, Rotation = Quaternion.Identity, Scale = Vector3.Zero };
+
+    // How much `to` differs from `from`.
+    private static Transform Change(Transform from, Transform to) => new()
+    {
+        Position = to.Position - from.Position,
+        Rotation = SyncValues.IsSameRotation(from.Rotation, to.Rotation) ? Quaternion.Identity : SyncValues.RotationFrom(from.Rotation, to.Rotation),
+        Scale = to.Scale - from.Scale,
+    };
+
+    private static Transform Add(Transform value, Transform change) => new()
+    {
+        Position = value.Position + change.Position,
+        Rotation = Quaternion.Normalize(change.Rotation * value.Rotation),
+        Scale = value.Scale + change.Scale,
+    };
+
+    private static List<SyncBoneStack> Add(List<SyncBoneStack> stacks, List<SyncBoneStack> change)
+    {
+        var result = new List<SyncBoneStack>(stacks.Count);
+        for(var i = 0; i < stacks.Count; i++)
+            result.Add(new SyncBoneStack { Propagate = stacks[i].Propagate, IK = stacks[i].IK, Transform = Add(stacks[i].Transform, change[i].Transform) });
+        return result;
+    }
+
+    // What changed from `last`; everything, as plain values, if there's no `last`.
     public static SyncActorEdits Diff(SyncActorEdits current, SyncActorEdits? last)
     {
-        var wire = new SyncActorEdits
-        {
-            Model = current.Model,
-            CompanionModel = current.CompanionModel,
-            Full = last is null,
-        };
-
         if(last is null)
+            return new SyncActorEdits { Model = current.Model, CompanionModel = current.CompanionModel, ModelAbsolute = true, CompanionAbsolute = true, Full = true, Bones = current.Bones };
+
+        var wire = new SyncActorEdits { Model = SyncCompare.Near(current.Model, last.Model) ? Unchanged : Change(last.Model, current.Model) };
+
+        if(current.CompanionModel is { } companion)
         {
-            wire.Bones = current.Bones;
-            wire.Digest = DigestOf(current);
-            return wire;
+            if(last.CompanionModel is { } lastCompanion)
+            {
+                wire.CompanionModel = SyncCompare.Near(companion, lastCompanion) ? Unchanged : Change(lastCompanion, companion);
+            }
+            else
+            {
+                wire.CompanionModel = companion;
+                wire.CompanionAbsolute = true;
+            }
         }
 
         var (i, j) = (0, 0);
@@ -139,10 +191,12 @@ public class SyncActorEdits
                 continue;
             }
 
-            var (currentKey, lastKey) = (current.Bones[i].Key, last.Bones[j].Key);
+            var (bone, lastBone) = (current.Bones[i], last.Bones[j]);
+            var (currentKey, lastKey) = (bone.Key, lastBone.Key);
             if(currentKey < lastKey)
             {
-                wire.Bones.Add(current.Bones[i++]);
+                wire.Bones.Add(bone);
+                i++;
             }
             else if(lastKey < currentKey)
             {
@@ -151,43 +205,141 @@ public class SyncActorEdits
             }
             else
             {
-                if(!Near(current.Bones[i], last.Bones[j]))
-                    wire.Bones.Add(current.Bones[i]);
+                if(!Near(bone.Stacks, lastBone.Stacks))
+                    wire.Bones.Add(ChangeOf(bone, lastBone));
                 i++;
                 j++;
             }
         }
 
-        // Of what the other side ends up with: bones within tolerance stay as last sent.
-        wire.Digest = Merge(wire, last).Digest;
         return wire;
     }
 
-    // The whole set after applying an update to what we had.
+    private static SyncBoneEdit ChangeOf(SyncBoneEdit bone, SyncBoneEdit last)
+    {
+        // Stacks were added or removed, so there's nothing to add them to.
+        if(!SameShape(bone.Stacks, last.Stacks))
+            return bone;
+
+        var change = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Absolute = false };
+        for(var s = 0; s < bone.Stacks.Count; s++)
+        {
+            var stack = bone.Stacks[s];
+            change.Stacks.Add(new SyncBoneStack { Propagate = stack.Propagate, IK = stack.IK, Transform = Change(last.Stacks[s].Transform, stack.Transform) });
+        }
+        return change;
+    }
+
+    // The whole set after an update.
     public static SyncActorEdits Merge(SyncActorEdits wire, SyncActorEdits? last)
     {
-        var merged = new SyncActorEdits { Model = wire.Model, CompanionModel = wire.CompanionModel, Full = true };
+        var merged = new SyncActorEdits
+        {
+            Model = wire.ModelAbsolute || last is null ? wire.Model : Add(last.Model, wire.Model),
+            CompanionModel = wire.CompanionModel is not { } companion
+                ? last?.CompanionModel
+                : wire.CompanionAbsolute || last?.CompanionModel is null ? companion : Add(last.CompanionModel.Value, companion),
+            Full = true,
+        };
 
-        if(wire.Full || last is null)
+        var bones = new Dictionary<uint, SyncBoneEdit>((last?.Bones.Count ?? 0) + wire.Bones.Count);
+        if(last is not null && !wire.Full)
         {
-            merged.Bones = wire.Bones;
-        }
-        else
-        {
-            var bones = new Dictionary<uint, SyncBoneEdit>(last.Bones.Count + wire.Bones.Count);
             foreach(var bone in last.Bones)
                 bones[bone.Key] = bone;
-            foreach(var key in wire.Removed)
-                bones.Remove(key);
-            foreach(var bone in wire.Bones)
-                bones[bone.Key] = bone;
-            merged.Bones = [.. bones.Values];
         }
 
+        foreach(var key in wire.Removed)
+            bones.Remove(key);
+
+        foreach(var bone in wire.Bones)
+        {
+            if(bone.Absolute)
+            {
+                bones[bone.Key] = bone;
+            }
+            else if(bones.TryGetValue(bone.Key, out var existing) && SameShape(existing.Stacks, bone.Stacks))
+            {
+                bones[bone.Key] = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Stacks = Add(existing.Stacks, bone.Stacks) };
+            }
+
+            // A change to stacks we don't have is put right by the next checkpoint.
+        }
+
+        merged.Bones = [.. bones.Values];
         merged.Sort();
-        merged.Digest = DigestOf(merged);
         return merged;
     }
+
+    // `current` with the change from `from` to `to` added on top, so anything changed locally
+    // and not sent yet is kept.
+    public static SyncActorEdits Rebase(SyncActorEdits current, SyncActorEdits from, SyncActorEdits to)
+    {
+        var rebased = new SyncActorEdits
+        {
+            Model = Add(current.Model, Change(from.Model, to.Model)),
+            CompanionModel = to.CompanionModel,
+            Full = true,
+        };
+
+        if(current.CompanionModel is { } companion && from.CompanionModel is { } fromCompanion && to.CompanionModel is { } toCompanion)
+            rebased.CompanionModel = Add(companion, Change(fromCompanion, toCompanion));
+
+        var fromBones = new Dictionary<uint, SyncBoneEdit>(from.Bones.Count);
+        foreach(var bone in from.Bones)
+            fromBones[bone.Key] = bone;
+
+        var toBones = new Dictionary<uint, SyncBoneEdit>(to.Bones.Count);
+        foreach(var bone in to.Bones)
+            toBones[bone.Key] = bone;
+
+        var bones = new Dictionary<uint, SyncBoneEdit>(current.Bones.Count + to.Bones.Count);
+
+        // Ours, unless the update took it away.
+        foreach(var bone in current.Bones)
+        {
+            if(!fromBones.ContainsKey(bone.Key) || toBones.ContainsKey(bone.Key))
+                bones[bone.Key] = bone;
+        }
+
+        foreach(var target in to.Bones)
+        {
+            var key = target.Key;
+            if(!bones.TryGetValue(key, out var mine) || !fromBones.TryGetValue(key, out var before))
+            {
+                bones[key] = target;
+            }
+            else if(Near(before.Stacks, target.Stacks))
+            {
+                // Untouched by the update: whatever we have stays.
+            }
+            else if(SameShape(mine.Stacks, before.Stacks) && SameShape(before.Stacks, target.Stacks))
+            {
+                var change = ChangeOf(target, before);
+                bones[key] = new SyncBoneEdit { Name = mine.Name, Partial = mine.Partial, Slot = mine.Slot, Companion = mine.Companion, Stacks = Add(mine.Stacks, change.Stacks) };
+            }
+            else
+            {
+                bones[key] = target;
+            }
+        }
+
+        rebased.Bones = [.. bones.Values];
+        rebased.Sort();
+        return rebased;
+    }
+
+    // What the creator sends once things go quiet: where the actor really is, and a digest of
+    // the bones. Anyone whose bones don't match asks for the ones that differ.
+    public static SyncActorEdits Checkpoint(SyncActorEdits known) => new()
+    {
+        Model = known.Model,
+        ModelAbsolute = true,
+        CompanionModel = known.CompanionModel,
+        CompanionAbsolute = true,
+        HasDigest = true,
+        Digest = DigestOf(known),
+    };
 
     public static ulong DigestOf(SyncActorEdits edits)
     {
@@ -210,7 +362,7 @@ public class SyncActorEdits
             hash = (hash ^ stack.Propagate ^ (stack.IK ? 256u : 0u)) * 16777619u;
             var (p, r, s) = (stack.Transform.Position, stack.Transform.Rotation, stack.Transform.Scale);
             Add(p.X, 1000); Add(p.Y, 1000); Add(p.Z, 1000);
-            Add(r.X, 100000); Add(r.Y, 100000); Add(r.Z, 100000); Add(r.W, 100000);
+            Add(r.X, 10000); Add(r.Y, 10000); Add(r.Z, 10000); Add(r.W, 10000);
             Add(s.X, 1000); Add(s.Y, 1000); Add(s.Z, 1000);
         }
 
@@ -232,14 +384,14 @@ public class SyncActorEdits
         return data;
     }
 
-    // The update that brings someone holding that digest up to `current`.
+    // The update that brings someone holding that digest up to `current`, in plain values.
     public static SyncActorEdits Repair(SyncActorEdits current, ReadOnlySpan<byte> digest)
     {
         var theirs = new Dictionary<uint, uint>(digest.Length / 8);
         for(var i = 0; i + 8 <= digest.Length; i += 8)
             theirs[BitConverter.ToUInt32(digest.Slice(i, 4))] = BitConverter.ToUInt32(digest.Slice(i + 4, 4));
 
-        var wire = new SyncActorEdits { Model = current.Model, CompanionModel = current.CompanionModel, Digest = DigestOf(current) };
+        var wire = new SyncActorEdits { Model = current.Model, ModelAbsolute = true, CompanionModel = current.CompanionModel, CompanionAbsolute = true };
 
         foreach(var bone in current.Bones)
         {
