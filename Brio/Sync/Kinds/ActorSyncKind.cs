@@ -16,8 +16,6 @@ using Brio.Sync.Mods;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using System;
-using System.Collections.Generic;
-using System.Numerics;
 using System.Threading.Tasks;
 
 namespace Brio.Sync.Kinds;
@@ -65,11 +63,9 @@ public class ActorSyncKind(
         public SyncActorMods? ModsShown { get; set; }
         public DateTime NextModCheck { get; set; }
 
-        // The last pose applied, for gliding to the next one.
-        public PoseData? Pose { get; set; }
+        // Whether a pose has been applied yet; the first one snaps into place.
+        public bool HasPose { get; set; }
     }
-
-    private record PoseMotion(PoseData From, PoseData To, DateTime Start);
 
     // Ours
 
@@ -86,7 +82,7 @@ public class ActorSyncKind(
         {
             AppearancePart => CaptureAppearance(actor),
             // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
-            PosePart => item.Motion is PoseMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor),
+            PosePart => item.Motion is TransformMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor),
             _ => CaptureMods(item, actor),
         };
     }
@@ -390,15 +386,22 @@ public class ActorSyncKind(
         });
     }
 
-    // The body glides from the last pose to this one (see Animate); a minion or mount just snaps.
+    // Bones are applied once per update. Only where the actor stands glides (see Animate), since
+    // re-importing a blended pose every frame is far too costly.
     private void ApplyPose(SyncItem item, ActorEntity entity, SpawnedState state, SyncActorPose dto)
     {
-        if(state.Pose is null)
-            Import(entity, dto.Body);
-        else
-            item.Motion = new PoseMotion(state.Pose, dto.Body, DateTime.UtcNow);
+        Import(entity, dto.Body);
 
-        state.Pose = dto.Body;
+        if(entity.TryGetCapability<PosingCapability>(out var posing))
+        {
+            var target = new Transform { Position = dto.Body.Position, Rotation = dto.Body.Rotation, Scale = dto.Body.Scale };
+            if(state.HasPose)
+                item.Motion = new TransformMotion(posing.ModelPosing.Transform, target, DateTime.UtcNow);
+            else
+                posing.ModelPosing.Transform = target;
+        }
+
+        state.HasPose = true;
 
         if(dto.Companion is not null
             && entity.TryGetCapability<CompanionCapability>(out var companion)
@@ -408,54 +411,30 @@ public class ActorSyncKind(
                 timeline.SetOverallSpeedOverride(0);
 
             Import(companionEntity, dto.Companion);
+
+            if(companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
+                companionPosing.ModelPosing.Transform = new Transform { Position = dto.Companion.Position, Rotation = dto.Companion.Rotation, Scale = dto.Companion.Scale };
         }
     }
 
     public override void Animate(SyncItem item, DateTime now)
     {
-        if(item.Motion is not PoseMotion motion || item.Entity is not ActorEntity entity)
+        if(item.Motion is not TransformMotion motion || item.Entity is not ActorEntity entity)
             return;
 
-        var t = (float)Math.Clamp((now - motion.Start) / TransformMotion.Duration, 0, 1);
-        Import(entity, t >= 1 ? motion.To : Blend(motion.From, motion.To, t));
+        if(entity.TryGetCapability<PosingCapability>(out var posing))
+            posing.ModelPosing.Transform = motion.At(now);
 
-        if(t >= 1)
+        if(motion.IsDone(now))
             item.Motion = null;
     }
 
-    private static PoseData Blend(PoseData from, PoseData to, float t)
-    {
-        static PoseData.Bone Mix(PoseData.Bone a, PoseData.Bone b, float t) => new()
-        {
-            Position = Vector3.Lerp(a.Position, b.Position, t),
-            Rotation = Quaternion.Slerp(a.Rotation, b.Rotation, t),
-            Scale = Vector3.Lerp(a.Scale, b.Scale, t),
-        };
-
-        var bones = new Dictionary<string, PoseData.Bone>(to.Bones.Count);
-        foreach(var (name, bone) in to.Bones)
-            bones[name] = from.Bones.TryGetValue(name, out var start) ? Mix(start, bone, t) : bone;
-
-        return new PoseData
-        {
-            Bones = bones,
-            MainHand = to.MainHand,
-            OffHand = to.OffHand,
-            Prop = to.Prop,
-            Ornament = to.Ornament,
-            Position = Vector3.Lerp(from.Position, to.Position, t),
-            Rotation = Quaternion.Slerp(from.Rotation, to.Rotation, t),
-            Scale = Vector3.Lerp(from.Scale, to.Scale, t),
-        };
-    }
-
+    // Merged into the bone's last stack. A new stack per update would pile up without limit, and
+    // every stack is re-applied every frame.
     private void Import(ActorEntity entity, PoseData pose)
     {
-        if(!entity.TryGetCapability<PosingCapability>(out var posing))
-            return;
-
-        posing.SkeletonPosing.ImportSkeletonPose(pose, posingService.SceneImporterOptions);
-        posing.ModelPosing.Transform = new Transform { Position = pose.Position, Rotation = pose.Rotation, Scale = pose.Scale };
+        if(entity.TryGetCapability<PosingCapability>(out var posing))
+            posing.SkeletonPosing.ImportSkeletonPose(pose, posingService.SceneImporterOptions, newStack: false);
     }
 
     public override void Release(SyncItem item, bool alive)

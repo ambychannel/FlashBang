@@ -61,9 +61,9 @@ public class SkeletonPosingCapability : ActorCharacterCapability
         _transitiveActions.ForEach(a => a(bone, poseInfo));
     }
 
-    public void ImportSkeletonPose(PoseData poseFile, PoseImporterOptions options, bool expressionPhase = false)
+    public void ImportSkeletonPose(PoseData poseFile, PoseImporterOptions options, bool expressionPhase = false, bool newStack = true)
     {
-        var importer = new PoseImporter(poseFile, options, expressionPhase);
+        var importer = new PoseImporter(poseFile, options, expressionPhase, newStack);
         RegisterTransitiveAction(importer.ApplyBone);
     }
 

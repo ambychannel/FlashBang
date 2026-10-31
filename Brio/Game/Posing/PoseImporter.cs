@@ -4,7 +4,7 @@ using Brio.Game.Posing.Skeletons;
 
 namespace Brio.Game.Posing;
 
-public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool expressionPhase = false)
+public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool expressionPhase = false, bool newStack = true)
 {
     public void ApplyBone(Bone bone, BonePoseInfo poseInfo)
     {
@@ -14,7 +14,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.Bones.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, TransformComponents.Position, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, TransformComponents.Position, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
 
                 return;
@@ -32,7 +32,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.Bones.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
             }
         }
@@ -44,7 +44,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.MainHand.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
             }
         }
@@ -56,7 +56,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.OffHand.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
             }
         }
@@ -68,7 +68,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.Prop.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
             }
         }
@@ -80,7 +80,7 @@ public class PoseImporter(PoseData poseFile, PoseImporterOptions options, bool e
             {
                 if(poseFile.Ornament.TryGetValue(bone.Name, out var fileBone))
                 {
-                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, true);
+                    poseInfo.Apply(fileBone, bone.LastRawTransform, TransformComponents.All, options.TransformComponents, BoneIKInfo.Disabled, PoseMirrorMode.None, newStack);
                 }
             }
         }
