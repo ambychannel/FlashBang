@@ -5,15 +5,15 @@
     "Punchline": "Multiplayer GPose: share your Brio scene with friends.",
     "Description": "Multiplayer GPose built on Brio. Put lights, props and cameras in a Sync folder and share them live with friends who join your room code.\n\nFlashBang includes all of Brio's tools, so turn off Brio before enabling FlashBang.\n\nBased on Brio by Etheirys (GPL-3.0).",
     "InternalName": "FlashBang",
-    "AssemblyVersion": "0.1.0.6",
-    "TestingAssemblyVersion": "0.1.0.6",
+    "AssemblyVersion": "0.1.0.7",
+    "TestingAssemblyVersion": "0.1.0.7",
     "RepoUrl": "https://github.com/ambychannel/FlashBang",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
     "TestingDalamudApiLevel": 15,
-    "DownloadLinkInstall": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.6/FlashBang.zip",
-    "DownloadLinkTesting": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.6/FlashBang.zip",
-    "DownloadLinkUpdate": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.6/FlashBang.zip",
+    "DownloadLinkInstall": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.7/FlashBang.zip",
+    "DownloadLinkTesting": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.7/FlashBang.zip",
+    "DownloadLinkUpdate": "https://github.com/ambychannel/FlashBang/releases/download/v0.1.0.7/FlashBang.zip",
     "Tags": [
       "gpose",
       "posing",
@@ -21,6 +21,6 @@
       "sync",
       "lights"
     ],
-    "DownloadCount": 10
+    "DownloadCount": 14
   }
 ]
