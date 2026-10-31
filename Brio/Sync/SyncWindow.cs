@@ -227,6 +227,7 @@ public class SyncWindow : Window, IDisposable
     private void DrawModCache()
     {
         ImGui.Spacing();
+        ImGui.TextDisabled($"FlashBang is using {_sync.AverageUpdateMs:F2} ms per frame");
         ImGui.TextDisabled($"Downloaded mods: {_sync.DownloadedModBytes / 1048576} MB (up to 10 GB is kept)");
         if(ImBrio.Button("Clear downloaded mods", FontAwesomeIcon.Trash))
             _sync.ClearDownloadedMods();

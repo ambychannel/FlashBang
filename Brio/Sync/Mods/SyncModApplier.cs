@@ -36,16 +36,21 @@ public class SyncModApplier(
         var gameObject = entity.GameObject;
         var index = await framework.RunOnFrameworkThread(() => gameObject.ObjectIndex);
 
-        var paths = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach(var file in mods.Files)
+        // Checks every file on disk, so not on the framework thread.
+        var paths = await Task.Run(() =>
         {
-            if(!cache.TryGet(file.Hash, out var local))
-                continue;
-            foreach(var gamePath in file.GamePaths)
-                paths[gamePath] = local;
-        }
-        foreach(var swap in mods.Swaps)
-            paths.TryAdd(swap.GamePath, swap.SwapPath);
+            var found = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach(var file in mods.Files)
+            {
+                if(!cache.TryGet(file.Hash, out var local))
+                    continue;
+                foreach(var gamePath in file.GamePaths)
+                    found[gamePath] = local;
+            }
+            foreach(var swap in mods.Swaps)
+                found.TryAdd(swap.GamePath, swap.SwapPath);
+            return found;
+        });
 
         var collection = previous?.Collection ?? await penumbraService.CreateTemporaryCollectionAsync($"FlashBang_{index}");
         if(collection == Guid.Empty)

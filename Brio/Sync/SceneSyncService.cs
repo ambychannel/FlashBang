@@ -12,6 +12,7 @@ using MessagePack;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -56,6 +57,8 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan LocalChangeWins = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DiscoverInterval = TimeSpan.FromMilliseconds(500);
+    private const double SlowUpdateMs = 2;
 
     private readonly EntityManager _entityManager;
     private readonly GPoseService _gPoseService;
@@ -87,6 +90,8 @@ public class SceneSyncService : MediatorSubscriberBase
     // can't be shown (outside GPose, different zone) so it comes back when it can.
     private readonly Dictionary<Guid, SyncItem> _items = [];
     private DateTime _nextCapture = DateTime.MinValue;
+    private DateTime _nextDiscover = DateTime.MinValue;
+    private DateTime _nextSlowWarning = DateTime.MinValue;
 
     // Objects waiting to be torn down, one per frame.
     private readonly Queue<SyncItem> _despawns = new();
@@ -104,6 +109,9 @@ public class SceneSyncService : MediatorSubscriberBase
     public IEnumerable<SyncItem> Items => _items.Values;
 
     public bool RelayNeedsUpdate => _modTransfer.RelayRejectsFiles;
+
+    // How long FlashBang takes per frame, for the Sync window.
+    public double AverageUpdateMs { get; private set; }
 
     public string RelayUrl => string.IsNullOrWhiteSpace(_configurationService.Configuration.Sync.RelayUrl)
         ? SyncConfiguration.DefaultRelayUrl
@@ -367,6 +375,22 @@ public class SceneSyncService : MediatorSubscriberBase
 
     private void OnFrameworkUpdate()
     {
+        var started = Stopwatch.GetTimestamp();
+
+        Update();
+
+        var ms = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        AverageUpdateMs += (ms - AverageUpdateMs) * 0.02;
+
+        if(ms > SlowUpdateMs && DateTime.UtcNow >= _nextSlowWarning)
+        {
+            _nextSlowWarning = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            Brio.Log.Warning($"FlashBang: a sync update took {ms:F1} ms (average {AverageUpdateMs:F2} ms).");
+        }
+    }
+
+    private void Update()
+    {
         if(_client is not null)
         {
             while(_client is not null && _client.TryDequeue(out var message))
@@ -382,18 +406,25 @@ public class SceneSyncService : MediatorSubscriberBase
         ProcessDespawns();
         Animate(now);
 
+        if(now >= _nextDiscover)
+        {
+            _nextDiscover = now + DiscoverInterval;
+            Discover();
+        }
+
         if(now >= _nextCapture)
         {
             _nextCapture = now + SyncLimits.SendInterval;
             Capture(now);
+
+            if(Status == SyncStatus.Connected)
+                _modTransfer.Tick();
         }
 
         if(_client is not null && Status == SyncStatus.Connected)
         {
             foreach(var (data, to) in _outbox.Take(_client.Limiter))
                 _ = _client.SendOpAsync(data, to);
-
-            _modTransfer.Tick();
         }
 
         if(now >= _nextCacheTrim)
@@ -1009,9 +1040,8 @@ public class SceneSyncService : MediatorSubscriberBase
             _outbox.Enqueue(ops, null);
     }
 
-    // Finds our own things in the Sync folder, and sends whatever changed on any item that's
-    // Live or asked to Sync now.
-    private void Capture(DateTime now)
+    // Finds our own things in the Sync folder, and any that were taken out of it.
+    private void Discover()
     {
         // Leaving GPose tears down our scene, but our things stay shared: nothing is removed for
         // others until we delete them, take them out of Sync, stop syncing or leave the room.
@@ -1019,7 +1049,6 @@ public class SceneSyncService : MediatorSubscriberBase
             return;
 
         var folder = FindSyncFolder();
-        var territory = _clientState.TerritoryType;
         var seen = new HashSet<EntityId>();
 
         if(folder is not null)
@@ -1078,6 +1107,16 @@ public class SceneSyncService : MediatorSubscriberBase
             item.Removed = true;
             _items.Remove(item.Id);
         }
+
+    }
+
+    // Sends whatever changed on any item that's Live or asked to Sync now.
+    private void Capture(DateTime now)
+    {
+        if(!_gPoseService.IsGPosing)
+            return;
+
+        var territory = _clientState.TerritoryType;
 
         foreach(var item in _items.Values)
         {

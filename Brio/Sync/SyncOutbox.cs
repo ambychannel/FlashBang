@@ -11,6 +11,7 @@ namespace Brio.Sync;
 public class SyncOutbox
 {
     private record Entry(SyncOp Op, string? To);
+    private static readonly List<(string Data, string? To)> Nothing = [];
 
     private readonly LinkedList<Entry> _live = [];
     private readonly LinkedList<Entry> _bulk = [];
@@ -56,6 +57,9 @@ public class SyncOutbox
     // Packs queued ops into relay messages, as many as the rate allows right now.
     public List<(string Data, string? To)> Take(SyncRateLimiter limiter)
     {
+        if(_live.Count == 0 && _bulk.Count == 0)
+            return Nothing;
+
         var messages = new List<(string, string?)>();
 
         while((_live.Count > 0 || _bulk.Count > 0) && limiter.TryTake())

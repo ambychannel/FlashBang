@@ -45,7 +45,7 @@ public class ActorSyncKind(
 
     public override TimeSpan CaptureInterval(byte part) => part switch
     {
-        AppearancePart => TimeSpan.FromSeconds(2),
+        AppearancePart => TimeSpan.FromSeconds(5),
         PosePart => TimeSpan.FromMilliseconds(200),
         _ => TimeSpan.FromSeconds(5),
     };

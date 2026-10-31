@@ -36,6 +36,16 @@ public class SyncModCache
         }
     }
 
+    // Whether we have a file, without touching the disk, for checks that run often.
+    public bool Has(string hash)
+    {
+        lock(_lock)
+        {
+            Scan();
+            return _files.ContainsKey(hash);
+        }
+    }
+
     public bool TryGet(string hash, out string path)
     {
         lock(_lock)

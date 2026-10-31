@@ -113,7 +113,7 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
         {
             foreach(var file in mods.Files)
             {
-                if(cache.TryGet(file.Hash, out _))
+                if(cache.Has(file.Hash))
                 {
                     have += file.Size;
                     continue;
@@ -148,6 +148,12 @@ public class SyncModTransfer(SyncModCache cache, SyncModSource source)
     // Sends requests for waiting files and retries stalled ones.
     public void Tick()
     {
+        lock(_lock)
+        {
+            if(_downloads.Count == 0)
+                return;
+        }
+
         List<(string Owner, List<string> Hashes)> requests = [];
         SyncRelayClient? client;
 
