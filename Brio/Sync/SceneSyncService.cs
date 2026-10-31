@@ -685,7 +685,9 @@ public class SceneSyncService : MediatorSubscriberBase
 
             if(!canShow)
             {
-                if(item.Entity is not null || item.Spawning)
+                // Only copies are ever hidden. Our own object isn't ours to take away just because
+                // it has nothing to show from yet: it has no parts until it's first shared.
+                if(!item.Mine && (item.Entity is not null || item.Spawning))
                     HideItem(item);
                 continue;
             }
