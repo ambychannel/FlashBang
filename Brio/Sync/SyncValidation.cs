@@ -4,6 +4,7 @@ using Brio.Files;
 using Brio.Game.Types;
 using Brio.Game.World.Interop;
 using Brio.Game.WorldObjects;
+using Brio.Resources;
 using Brio.Services.Models;
 using System;
 using System.Collections.Generic;
@@ -21,6 +22,8 @@ public static class SyncValidation
     private const int MaxBonesPerSkeleton = 1024;
     private const int MaxGlamourerStateLength = 64 * 1024;
     private const int MaxPathLength = 256;
+    private const int MaxBoneEdits = 4096;
+    private const int MaxStacksPerBone = 32;
 
     public static bool IsValid(LightDTO dto)
     {
@@ -169,6 +172,48 @@ public static class SyncValidation
         {
             if(!(char.IsAsciiLetterOrDigit(c) || c is '/' or '_' or '-' or '.'))
                 return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsValid(SyncAnimState dto)
+    {
+        if(!IsFinite(dto.Speed, 100f) || !IsFinite(dto.Time, MaxValue) || !IsFinite(dto.Duration, MaxValue))
+            return false;
+
+        if(!IsTimeline(dto.Base) || !IsTimeline(dto.Blend))
+            return false;
+
+        return dto.Companion is null || IsValid(dto.Companion);
+    }
+
+    // A real animation, or none.
+    public static bool IsTimeline(ushort id)
+        => id == 0 || GameDataProvider.Instance.ActionTimelines.HasRow(id);
+
+    public static bool IsValid(SyncActorEdits dto)
+    {
+        if(dto.Bones is null || dto.Removed is null || dto.Bones.Count > MaxBoneEdits || dto.Removed.Count > MaxBoneEdits)
+            return false;
+
+        if(!IsValid(dto.Model) || (dto.CompanionModel.HasValue && !IsValid(dto.CompanionModel.Value)))
+            return false;
+
+        foreach(var bone in dto.Bones)
+        {
+            if(string.IsNullOrEmpty(bone.Name) || bone.Name.Length > MaxNameLength || bone.Partial is < 0 or > 255 || bone.Slot > (byte)Game.Posing.PoseInfoSlot.Ornament)
+                return false;
+
+            if(bone.Stacks is null || bone.Stacks.Count > MaxStacksPerBone)
+                return false;
+
+            foreach(var stack in bone.Stacks)
+            {
+                var t = stack.Transform;
+                if(stack.Propagate > 7 || !IsFinite(t.Position, MaxCoordinate) || !IsFinite(t.Scale, MaxValue) || !IsFinite(t.Rotation))
+                    return false;
+            }
         }
 
         return true;

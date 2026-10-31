@@ -42,6 +42,29 @@ public abstract class SyncKind
     // False just means "compare the encoded bytes instead".
     public virtual bool IsSame(byte part, object a, object b) => false;
 
+    // What to send for a value, given what was last sent. The whole value by default.
+    public virtual object ToWire(byte part, object value, object? last) => value;
+
+    // Folds a received (or just sent) update into what we had. inSync is false if the result
+    // doesn't match what the sender has.
+    public virtual object Merge(byte part, object wire, object? last, out bool inSync)
+    {
+        inSync = true;
+        return wire;
+    }
+
+    // Parts sent as differences, where every update matters and none can replace another.
+    public virtual bool IsDiffed(byte part) => false;
+
+    // Whether Sync now sends this part even if nothing about it changed.
+    public virtual bool SendWhenSame(byte part) => true;
+
+    // A digest of what we have, for asking a player for only what differs.
+    public virtual byte[]? RepairDigest(byte part, object? known) => null;
+
+    // The update that brings someone holding that digest up to what we have.
+    public virtual object? RepairAnswer(byte part, object known, byte[] digest) => null;
+
     // Decodes and checks one part from another player. Null means it's dropped.
     public abstract object? Decode(byte part, byte[] compressed);
 
@@ -91,6 +114,8 @@ public class PartTrack
 
     // When we last sent a change of our own.
     public DateTime LastLocalChange { get; set; }
+
+    public DateTime NextRepair { get; set; }
 
     public DateTime NextCapture { get; set; }
     public bool WarnedTooLarge { get; set; }

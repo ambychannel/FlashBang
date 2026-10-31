@@ -18,13 +18,14 @@ public class SyncOutbox
 
     public int Waiting => _live.Count + _bulk.Count;
 
-    public void Enqueue(List<SyncOp> ops, string? to)
+    public void Enqueue(List<SyncOp> ops, string? to, bool replaceOlder = true)
     {
         if(ops.Count == 0)
             return;
 
         var first = ops[0];
-        Drop(first.SyncId, first.Kind == SyncOpKind.Remove ? null : first.Part, to);
+        if(replaceOlder)
+            Drop(first.SyncId, first.Kind == SyncOpKind.Remove ? null : first.Part, to);
 
         var queue = ops.Count > 2 ? _bulk : _live;
         foreach(var op in ops)

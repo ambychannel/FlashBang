@@ -12,6 +12,8 @@ public class PoseInfo
 {
     private readonly Dictionary<BonePoseInfoId, BonePoseInfo> _poses = [];
 
+    public IReadOnlyDictionary<BonePoseInfoId, BonePoseInfo> Poses => _poses;
+
     public BonePoseInfo GetPoseInfo(BonePoseInfoId id)
     {
         if(_poses.TryGetValue(id, out var pose))

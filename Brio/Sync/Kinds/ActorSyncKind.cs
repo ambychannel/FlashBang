@@ -13,6 +13,7 @@ using Brio.Game.Posing;
 using Brio.Game.Types;
 using Brio.IPC;
 using Brio.Sync.Mods;
+using System.Collections.Generic;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using System;
@@ -20,9 +21,11 @@ using System.Threading.Tasks;
 
 namespace Brio.Sync.Kinds;
 
-// Actors are sent as three parts: appearance (part 0, checked every couple of seconds), pose
-// (part 1, at most twice a second) and the list of mod files they use (part 2), so posing
-// doesn't resend the whole character. Mod files themselves go through SyncModTransfer.
+// An actor is what it looks like (part 0), the mod files it uses (part 2), which animation it's
+// playing and at what frame (part 3), and the bones posed by hand on top of that (part 4). The
+// other side plays the animation itself, and each part only goes out when it differs. A whole
+// pose (part 1) is only for an actor whose animation can't be shared, and only on Sync now.
+// Mod files themselves go through SyncModTransfer.
 public class ActorSyncKind(
     EntityManager entityManager,
     IFramework framework,
@@ -36,17 +39,24 @@ public class ActorSyncKind(
     private const byte AppearancePart = 0;
     private const byte PosePart = 1;
     private const byte ModsPart = 2;
+    private const byte AnimPart = 3;
+    private const byte EditsPart = 4;
+
+    // How far a playing animation may stray from where it should be, and how often that's checked.
+    private const float DriftSeconds = 0.25f;
+    private const float ScrubSeconds = 0.02f;
+    private static readonly TimeSpan DriftCheckInterval = TimeSpan.FromSeconds(10);
 
     private static readonly TimeSpan ModCheckInterval = TimeSpan.FromMilliseconds(500);
 
     public override SyncEntityType Type => SyncEntityType.Actor;
     public override int MaxPerPlayer => SyncLimits.MaxActorsPerPlayer;
-    public override byte PartCount => 3;
+    public override byte PartCount => 5;
 
     public override TimeSpan CaptureInterval(byte part) => part switch
     {
         AppearancePart => TimeSpan.FromSeconds(5),
-        PosePart => TimeSpan.FromMilliseconds(200),
+        PosePart or AnimPart or EditsPart => TimeSpan.FromMilliseconds(200),
         _ => TimeSpan.FromSeconds(5),
     };
 
@@ -82,25 +92,180 @@ public class ActorSyncKind(
         {
             AppearancePart => CaptureAppearance(actor),
             // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
-            PosePart => CaptureLivePose(item, actor),
+            PosePart => CaptureWholePose(item, actor),
+            AnimPart => CaptureAnim(item, actor),
+            EditsPart => CaptureEdits(item, actor),
             _ => CaptureMods(item, actor),
         };
     }
 
-    private static object? CaptureLivePose(SyncItem item, ActorEntity actor)
+    // Only when there's no animation the other side could play, and never on a timer.
+    private static object? CaptureWholePose(SyncItem item, ActorEntity actor)
     {
-        // A playing animation changes every bone every frame, so it can't be streamed. Sync now
-        // still sends the pose as it is at that moment.
-        if(!item.SyncNowRequested && actor.TryGetCapability<ActionTimelineCapability>(out var timeline) && timeline.SpeedMultiplier != 0)
-        {
-            item.Note = "This actor is animating. Freeze it to share its pose live.";
+        var usable = HasUsableTimeline(actor);
+        item.Note = usable ? null : "Its animation can't be shared, so only Sync now sends its pose.";
+        return !usable && item.SyncNowRequested ? CapturePose(actor) : null;
+    }
+
+    private static unsafe bool HasUsableTimeline(ActorEntity actor)
+    {
+        var character = actor.GetCapability<ActorAppearanceCapability>().Character;
+        var id = character.Native()->Timeline.TimelineSequencer.TimelineIds[(int)ActionTimelineService.ActionTimelineSlots.Base];
+        return id != 0 && SyncValidation.IsTimeline(id);
+    }
+
+    private static object? CaptureAnim(SyncItem item, ActorEntity actor)
+    {
+        if(ReadAnim(actor) is not { } current)
             return null;
+
+        // A copy plays what it's told. Only something a person did to it counts as a change.
+        if(!item.Mine && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
+            return known;
+
+        if(actor.TryGetCapability<CompanionCapability>(out var companion) && companion.GetCompanionAsEntity() is ActorEntity companionEntity)
+            current.Companion = ReadAnim(companionEntity);
+
+        return current;
+    }
+
+    private static unsafe bool ChangedByHand(ActorEntity actor, SyncAnimState current, SyncAnimState known)
+    {
+        if(current.Frozen != known.Frozen || (!current.Frozen && !SyncCompare.Near(current.Speed, known.Speed)))
+            return true;
+
+        if(current.Frozen && MathF.Abs(current.Time - known.Time) > ScrubSeconds)
+            return true;
+
+        var character = actor.GetCapability<ActorAppearanceCapability>().Character;
+        var chosen = character.Native()->Timeline.BaseOverride;
+        if(chosen == known.Base)
+            return false;
+
+        current.Base = chosen;
+        return true;
+    }
+
+    private static unsafe SyncAnimState? ReadAnim(ActorEntity actor)
+    {
+        if(!actor.TryGetCapability<ActionTimelineCapability>(out var timeline))
+            return null;
+
+        var sequencer = &timeline.Character.Native()->Timeline.TimelineSequencer;
+        var speed = timeline.SpeedMultiplier;
+        var (time, duration) = ReadTime(actor);
+
+        return new SyncAnimState
+        {
+            Base = sequencer->TimelineIds[(int)ActionTimelineService.ActionTimelineSlots.Base],
+            Blend = sequencer->TimelineIds[(int)ActionTimelineService.ActionTimelineSlots.UpperBody],
+            Speed = speed,
+            Frozen = speed == 0,
+            Time = time,
+            Duration = duration,
+            At = DateTime.UtcNow,
+        };
+    }
+
+    // The main animation's position, as Brio's scrub slider reads it.
+    private static unsafe (float Time, float Duration) ReadTime(ActorEntity actor)
+    {
+        var skeleton = SkeletonOf(actor);
+        if(skeleton == null || skeleton->PartialSkeletonCount == 0)
+            return (0, 0);
+
+        var animated = skeleton->PartialSkeletons[0].GetHavokAnimatedSkeleton(0);
+        if(animated == null || animated->AnimationControls.Length == 0)
+            return (0, 0);
+
+        var control = animated->AnimationControls[0].Value;
+        if(control == null)
+            return (0, 0);
+
+        var binding = control->hkaAnimationControl.Binding;
+        var duration = binding.ptr != null && binding.ptr->Animation.ptr != null ? binding.ptr->Animation.ptr->Duration : 0;
+        return (control->hkaAnimationControl.LocalTime, duration);
+    }
+
+    // Moves the main animation of every part of the skeleton to a time.
+    private static unsafe void Seek(ActorEntity actor, float time)
+    {
+        var skeleton = SkeletonOf(actor);
+        if(skeleton == null)
+            return;
+
+        for(var p = 0; p < skeleton->PartialSkeletonCount; p++)
+        {
+            var animated = skeleton->PartialSkeletons[p].GetHavokAnimatedSkeleton(0);
+            if(animated == null || animated->AnimationControls.Length == 0)
+                continue;
+
+            var control = animated->AnimationControls[0].Value;
+            if(control == null)
+                continue;
+
+            var binding = control->hkaAnimationControl.Binding;
+            if(binding.ptr == null || binding.ptr->Animation.ptr == null)
+                continue;
+
+            control->hkaAnimationControl.LocalTime = Math.Clamp(time, 0, binding.ptr->Animation.ptr->Duration);
+        }
+    }
+
+    private static unsafe FFXIVClientStructs.FFXIV.Client.Graphics.Render.Skeleton* SkeletonOf(ActorEntity actor)
+    {
+        if(actor.GameObject is not ICharacter character)
+            return null;
+
+        var drawObject = character.Native()->GameObject.DrawObject;
+        if(drawObject == null || drawObject->Object.GetObjectType() != FFXIVClientStructs.FFXIV.Client.Graphics.Scene.ObjectType.CharacterBase)
+            return null;
+
+        return ((FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase*)drawObject)->Skeleton;
+    }
+
+    private static object? CaptureEdits(SyncItem item, ActorEntity actor)
+    {
+        if(!actor.TryGetCapability<PosingCapability>(out var posing))
+            return null;
+
+        var edits = new SyncActorEdits
+        {
+            Full = true,
+
+            // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
+            Model = item.Motion is TransformMotion motion ? motion.To : posing.ModelPosing.Transform,
+        };
+        ReadBones(posing, edits, false);
+
+        if(actor.TryGetCapability<CompanionCapability>(out var companion)
+            && companion.GetCompanionAsEntity() is ActorEntity companionEntity
+            && companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
+        {
+            edits.CompanionModel = companionPosing.ModelPosing.Transform;
+            ReadBones(companionPosing, edits, true);
         }
 
-        item.Note = null;
+        edits.Sort();
+        return edits;
+    }
 
-        // Mid-glide, report where it's heading so the in-between doesn't look like an edit.
-        return item.Motion is TransformMotion && item.Parts.TryGetValue(PosePart, out var target) ? target : CapturePose(actor);
+    private static void ReadBones(PosingCapability posing, SyncActorEdits edits, bool companion)
+    {
+        foreach(var (id, info) in posing.SkeletonPosing.PoseInfo.Poses)
+        {
+            if(!info.HasStacks)
+                continue;
+
+            edits.Bones.Add(new SyncBoneEdit
+            {
+                Name = id.BoneName,
+                Partial = id.Partial,
+                Slot = (byte)id.Slot,
+                Companion = companion,
+                Stacks = SyncActorEdits.StacksOf(info),
+            });
+        }
     }
 
     private SyncActorMods? CaptureMods(SyncItem item, ActorEntity actor)
@@ -169,14 +334,74 @@ public class ActorSyncKind(
     public override bool IsSame(byte part, object a, object b) => part switch
     {
         PosePart => SyncCompare.Near((SyncActorPose)a, (SyncActorPose)b),
+        AnimPart => IsSameAnim((SyncAnimState)a, (SyncAnimState)b),
+        EditsPart => SyncActorEdits.Near((SyncActorEdits)a, (SyncActorEdits)b),
         ModsPart => SyncCompare.Same((SyncActorMods)a, (SyncActorMods)b),
         _ => false,
     };
+
+    // A playing animation always moves, so what matters is whether it's where it should be by now.
+    private static bool IsSameAnim(SyncAnimState a, SyncAnimState b)
+    {
+        if(ReferenceEquals(a, b))
+            return true;
+
+        if(a.Base != b.Base || a.Blend != b.Blend || a.Frozen != b.Frozen)
+            return false;
+
+        if((a.Companion is null) != (b.Companion is null) || (a.Companion is not null && !IsSameAnim(a.Companion, b.Companion!)))
+            return false;
+
+        if(a.Frozen)
+            return MathF.Abs(a.Time - b.Time) <= ScrubSeconds;
+
+        if(!SyncCompare.Near(a.Speed, b.Speed))
+            return false;
+
+        var elapsed = a.At - b.At;
+        if(elapsed < DriftCheckInterval || b.Duration <= 0)
+            return true;
+
+        var expected = b.Time + (float)elapsed.TotalSeconds * b.Speed;
+        var drift = MathF.Abs(MathF.IEEERemainder(a.Time - expected, b.Duration));
+        return drift <= DriftSeconds;
+    }
+
+    public override bool IsDiffed(byte part) => part == EditsPart;
+
+    public override bool SendWhenSame(byte part) => part != AnimPart && part != EditsPart;
+
+    public override object ToWire(byte part, object value, object? last)
+        => part == EditsPart ? SyncActorEdits.Diff((SyncActorEdits)value, last as SyncActorEdits) : value;
+
+    public override object Merge(byte part, object wire, object? last, out bool inSync)
+    {
+        inSync = true;
+
+        if(wire is SyncAnimState anim && anim.At == default)
+            anim.At = DateTime.UtcNow;
+
+        if(part != EditsPart)
+            return wire;
+
+        var received = (SyncActorEdits)wire;
+        var merged = SyncActorEdits.Merge(received, last as SyncActorEdits);
+        inSync = merged.Digest == received.Digest;
+        return merged;
+    }
+
+    public override byte[]? RepairDigest(byte part, object? known)
+        => part == EditsPart ? SyncActorEdits.BoneDigest(known as SyncActorEdits) : null;
+
+    public override object? RepairAnswer(byte part, object known, byte[] digest)
+        => part == EditsPart ? SyncActorEdits.Repair((SyncActorEdits)known, digest) : null;
 
     public override byte[] Encode(byte part, object value) => part switch
     {
         AppearancePart => SyncCodec.Encode((SyncActorAppearance)value),
         PosePart => SyncCodec.Encode((SyncActorPose)value),
+        AnimPart => SyncCodec.Encode((SyncAnimState)value),
+        EditsPart => SyncCodec.Encode((SyncActorEdits)value),
         _ => SyncCodec.Encode((SyncActorMods)value),
     };
 
@@ -184,6 +409,18 @@ public class ActorSyncKind(
 
     public override object? Decode(byte part, byte[] compressed)
     {
+        if(part == AnimPart)
+        {
+            var anim = SyncCodec.Decode<SyncAnimState>(compressed, SyncLimits.MaxPartBytes);
+            return anim is not null && SyncValidation.IsValid(anim) ? anim : null;
+        }
+
+        if(part == EditsPart)
+        {
+            var edits = SyncCodec.Decode<SyncActorEdits>(compressed, SyncLimits.MaxPartBytes * 4);
+            return edits is not null && SyncValidation.IsValid(edits) ? edits : null;
+        }
+
         if(part == ModsPart)
         {
             var mods = SyncCodec.Decode<SyncActorMods>(compressed, SyncLimits.MaxPartBytes * 4);
@@ -285,13 +522,24 @@ public class ActorSyncKind(
             _ = ApplyAppearance(entity, appearance, state, () => item.IsCurrent(generation) && IsAlive(item)).ContinueWith(_ => framework.RunOnFrameworkThread(() =>
             {
                 if(item.IsCurrent(generation))
+                {
                     item.Busy = false;
+
+                    // A redraw restarts the animation.
+                    item.Dirty.Add(AnimPart);
+                }
             }));
             return;
         }
 
         if(item.Dirty.Remove(PosePart) && item.Parts.TryGetValue(PosePart, out var poseValue))
             ApplyPose(item, entity, state, (SyncActorPose)poseValue);
+
+        if(item.Dirty.Remove(AnimPart) && item.Parts.TryGetValue(AnimPart, out var animValue))
+            ApplyAnim(item, entity, (SyncAnimState)animValue);
+
+        if(item.Dirty.Remove(EditsPart) && item.Parts.TryGetValue(EditsPart, out var editsValue))
+            ApplyEdits(item, entity, state, (SyncActorEdits)editsValue);
 
         if(item.Dirty.Remove(ModsPart) && !item.Mine && item.Parts.TryGetValue(ModsPart, out var modsValue))
             UpdateMods(item, entity, state, (SyncActorMods)modsValue);
@@ -363,8 +611,10 @@ public class ActorSyncKind(
             entity.IsLoading = false;
             item.Busy = false;
 
-            // A redraw resets the skeleton.
+            // A redraw resets the skeleton and restarts the animation.
             item.Dirty.Add(PosePart);
+            item.Dirty.Add(AnimPart);
+            item.Dirty.Add(EditsPart);
         }));
     }
 
@@ -407,6 +657,107 @@ public class ActorSyncKind(
                 Brio.Log.Warning(ex, $"FlashBang: couldn't apply the look of {dto.Name}.");
             }
         });
+    }
+
+    // Plays what the other side is playing, then moves to the same frame once it has started.
+    private void ApplyAnim(SyncItem item, ActorEntity entity, SyncAnimState dto)
+    {
+        var generation = item.Generation;
+        Func<bool> stillThere = () => item.IsCurrent(generation) && IsAlive(item);
+
+        PlayAnim(entity, dto, stillThere);
+
+        if(dto.Companion is not null
+            && entity.TryGetCapability<CompanionCapability>(out var companion)
+            && companion.GetCompanionAsEntity() is ActorEntity companionEntity)
+        {
+            PlayAnim(companionEntity, dto.Companion, () => stillThere() && companion.GetCompanionAsEntity() == companionEntity);
+        }
+    }
+
+    private unsafe void PlayAnim(ActorEntity entity, SyncAnimState dto, Func<bool> stillThere)
+    {
+        if(!entity.TryGetCapability<ActionTimelineCapability>(out var timeline))
+            return;
+
+        var sequencer = &timeline.Character.Native()->Timeline.TimelineSequencer;
+        var currentBase = sequencer->TimelineIds[(int)ActionTimelineService.ActionTimelineSlots.Base];
+        var currentBlend = sequencer->TimelineIds[(int)ActionTimelineService.ActionTimelineSlots.UpperBody];
+
+        var starting = (dto.Base != 0 && dto.Base != currentBase) || (dto.Blend != 0 && dto.Blend != currentBlend);
+
+        // It has to run for a moment for a new animation to take hold, even if it ends up frozen.
+        timeline.SetOverallSpeedOverride(dto.Frozen ? (starting ? 1f : 0f) : dto.Speed);
+
+        if(dto.Base != 0 && dto.Base != currentBase)
+            timeline.ApplyBaseOverride(dto.Base, true);
+
+        if(dto.Blend != 0 && dto.Blend != currentBlend)
+            timeline.BlendTimeline(dto.Blend);
+
+        if(!starting)
+        {
+            Seek(entity, dto.Time);
+            return;
+        }
+
+        framework.RunOnTick(() =>
+        {
+            if(!stillThere())
+                return;
+
+            Seek(entity, dto.Time);
+            if(dto.Frozen)
+                timeline.SetOverallSpeedOverride(0);
+        }, delayTicks: 3);
+    }
+
+    // Writes only the bones that differ, and clears any that shouldn't have changes any more.
+    private void ApplyEdits(SyncItem item, ActorEntity entity, SpawnedState state, SyncActorEdits dto)
+    {
+        if(entity.TryGetCapability<PosingCapability>(out var posing))
+        {
+            WriteBones(posing, dto, false);
+
+            if(state.HasPose)
+                item.Motion = new TransformMotion(posing.ModelPosing.Transform, dto.Model, DateTime.UtcNow);
+            else
+                posing.ModelPosing.Transform = dto.Model;
+
+            state.HasPose = true;
+        }
+
+        if(entity.TryGetCapability<CompanionCapability>(out var companion)
+            && companion.GetCompanionAsEntity() is ActorEntity companionEntity
+            && companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
+        {
+            WriteBones(companionPosing, dto, true);
+
+            if(dto.CompanionModel.HasValue)
+                companionPosing.ModelPosing.Transform = dto.CompanionModel.Value;
+        }
+    }
+
+    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion)
+    {
+        var poseInfo = posing.SkeletonPosing.PoseInfo;
+        var wanted = new HashSet<BonePoseInfoId>();
+
+        foreach(var bone in dto.Bones)
+        {
+            if(bone.Companion != companion)
+                continue;
+
+            var id = new BonePoseInfoId(bone.Name, bone.Partial, (PoseInfoSlot)bone.Slot);
+            wanted.Add(id);
+            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone);
+        }
+
+        foreach(var (id, info) in poseInfo.Poses)
+        {
+            if(info.HasStacks && !wanted.Contains(id))
+                info.ClearStacks();
+        }
     }
 
     // Bones are applied once per update. Only where the actor stands glides (see Animate), since

@@ -57,6 +57,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan LocalChangeWins = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RepairInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DiscoverInterval = TimeSpan.FromMilliseconds(500);
     private const double SlowUpdateMs = 2;
 
@@ -623,6 +624,13 @@ public class SceneSyncService : MediatorSubscriberBase
                 continue;
             }
 
+            if(op.Kind == SyncOpKind.Repair)
+            {
+                if(item is not null && op.Data is not null)
+                    AnswerRepair(item, op, peer);
+                continue;
+            }
+
             if(op.Kind != SyncOpKind.Upsert)
                 continue;
 
@@ -657,6 +665,9 @@ public class SceneSyncService : MediatorSubscriberBase
 
             if(item is null)
             {
+                if(op.IsRepair)
+                    continue;
+
                 var theirs = _items.Values.Where(i => i.Creator == peer).ToList();
                 if(theirs.Count >= SyncLimits.MaxItemsPerPlayer || theirs.Count(i => i.Kind == kind) >= kind.MaxPerPlayer)
                     continue;
@@ -665,27 +676,70 @@ public class SceneSyncService : MediatorSubscriberBase
             }
 
             var track = item.Tracks[op.Part];
-            if(!track.IsNewer(op.Revision, peer.Id))
-                continue;
+            if(!op.IsRepair)
+            {
+                if(!track.IsNewer(op.Revision, peer.Id))
+                    continue;
 
-            track.Revision = op.Revision;
-            track.Writer = peer.Id;
+                track.Revision = op.Revision;
+                track.Writer = peer.Id;
+            }
 
             if(!item.Mine && item.Creator == peer)
                 item.Territory = op.Territory;
 
-            // What we already have, give or take noise: nothing to apply.
-            if(track.LastKnown is not null && kind.IsSame(op.Part, value, track.LastKnown))
-                continue;
-
             // We're changing this right now, and our next update will win.
             if(item.Mine && item.Live && DateTime.UtcNow - track.LastLocalChange < LocalChangeWins)
+                continue;
+
+            value = kind.Merge(op.Part, value, track.LastKnown, out var inSync);
+            if(!inSync)
+                RequestRepair(item, op.Part, peer, DateTime.UtcNow);
+
+            // What we already have, give or take noise: nothing to apply.
+            if(track.LastKnown is not null && kind.IsSame(op.Part, value, track.LastKnown))
                 continue;
 
             track.LastKnown = value;
             item.Parts[op.Part] = value;
             item.Dirty.Add(op.Part);
         }
+    }
+
+    // Our copy of a part has fallen out of step: send a digest of it, and get back only what differs.
+    private void RequestRepair(SyncItem item, byte part, SyncPeer peer, DateTime now)
+    {
+        var track = item.Tracks[part];
+        if(now < track.NextRepair)
+            return;
+
+        var digest = item.Kind.RepairDigest(part, track.LastKnown);
+        if(digest is null)
+            return;
+
+        track.NextRepair = now + RepairInterval;
+
+        // Too many bones to list: an empty digest gets all of them.
+        if(digest.Length > SyncLimits.ChunkBytes)
+            digest = [];
+
+        _outbox.Enqueue([new SyncOp { Kind = SyncOpKind.Repair, SyncId = item.Id, Type = item.Kind.Type, Part = part, Data = digest }], peer.Id, false);
+    }
+
+    private void AnswerRepair(SyncItem item, SyncOp op, SyncPeer peer)
+    {
+        if(op.Part >= item.Kind.PartCount || op.Data!.Length > SyncLimits.ChunkBytes)
+            return;
+
+        var track = item.Tracks[op.Part];
+        if(track.LastKnown is null || item.Kind.RepairAnswer(op.Part, track.LastKnown, op.Data) is not { } answer)
+            return;
+
+        var ops = SyncCodec.Split(item.Id, item.Kind.Type, op.Part, item.Territory, track.Revision, item.Kind.Encode(op.Part, answer));
+        foreach(var repair in ops)
+            repair.IsRepair = true;
+
+        _outbox.Enqueue(ops, peer.Id, false);
     }
 
     // Showing and applying
@@ -1132,6 +1186,16 @@ public class SceneSyncService : MediatorSubscriberBase
             for(byte part = 0; part < item.Kind.PartCount; part++)
                 sent |= CapturePart(item, part, force, now);
 
+            // Pressed on a copy: also make sure we have everything its creator has.
+            if(force && item.Creator is { } creator)
+            {
+                for(byte part = 0; part < item.Kind.PartCount; part++)
+                {
+                    if(item.Kind.IsDiffed(part))
+                        RequestRepair(item, part, creator, now);
+                }
+            }
+
             if(force)
                 item.SyncNowRequested = false;
 
@@ -1159,7 +1223,11 @@ public class SceneSyncService : MediatorSubscriberBase
         track.NextCapture = now + kind.CaptureInterval(part);
 
         object? value;
+        object wire;
         byte[] bytes;
+        var last = track.LastKnown;
+        var diffed = kind.IsDiffed(part);
+        bool same;
         try
         {
             value = kind.Capture(item, part);
@@ -1167,11 +1235,12 @@ public class SceneSyncService : MediatorSubscriberBase
                 return false;
 
             // Unchanged, give or take noise: done, without encoding anything.
-            var same = track.LastKnown is not null && kind.IsSame(part, value, track.LastKnown);
-            if(same && !force && !track.Absorb)
+            same = last is not null && kind.IsSame(part, value, last);
+            if(same && !track.Absorb && (!force || !kind.SendWhenSame(part)))
                 return false;
 
-            bytes = same && track.Baseline is not null ? track.Baseline : kind.Encode(part, value);
+            wire = kind.ToWire(part, value, last);
+            bytes = same && !diffed && track.Baseline is not null ? track.Baseline : kind.Encode(part, wire);
         }
         catch(Exception ex)
         {
@@ -1192,23 +1261,28 @@ public class SceneSyncService : MediatorSubscriberBase
         if(track.Absorb)
         {
             track.Absorb = false;
-            track.Baseline = bytes;
-            track.LastKnown = value;
+            if(!diffed)
+                track.Baseline = bytes;
+            if(!same)
+                track.LastKnown = value;
             if(!force)
                 return false;
         }
 
-        if(!force && track.Baseline is not null && track.Baseline.AsSpan().SequenceEqual(bytes))
+        if(!force && !diffed && track.Baseline is not null && track.Baseline.AsSpan().SequenceEqual(bytes))
             return false;
 
-        track.Baseline = bytes;
-        track.LastKnown = value;
+        if(!diffed)
+            track.Baseline = bytes;
+
+        track.LastKnown = kind.Merge(part, wire, last, out _);
         track.LastLocalChange = now;
-        item.Parts[part] = value;
+        item.Parts[part] = track.LastKnown;
         track.Revision++;
         track.Writer = _me;
 
-        Broadcast(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes));
+        if(AnyLinked)
+            _outbox.Enqueue(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes), null, !diffed);
 
         try
         {
@@ -1230,8 +1304,12 @@ public class SceneSyncService : MediatorSubscriberBase
             for(byte part = 0; part < item.Tracks.Length; part++)
             {
                 var track = item.Tracks[part];
-                if(track.Baseline is not null)
-                    _outbox.Enqueue(SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, track.Baseline), peer.Id);
+                if(track.LastKnown is null)
+                    continue;
+
+                var kind = item.Kind;
+                var bytes = kind.Encode(part, kind.ToWire(part, track.LastKnown, null));
+                _outbox.Enqueue(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes), peer.Id, !kind.IsDiffed(part));
             }
         }
     }

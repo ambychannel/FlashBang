@@ -17,6 +17,9 @@ public enum SyncOpKind : byte
 {
     Upsert = 1,
     Remove = 2,
+
+    // Carries a digest of what we have, asking a player for only what differs.
+    Repair = 3,
 }
 
 // One chunk of one part of one shared item. An item is sent as one or more parts (an actor's
@@ -38,6 +41,9 @@ public class SyncOp
     public ushort Chunk { get; set; }
     public ushort ChunkCount { get; set; }
     public byte[]? Data { get; set; }
+
+    // An answer to a Repair. Not a new edit, so it doesn't compete on revision.
+    public bool IsRepair { get; set; }
 }
 
 // What travels in one relay "op" message.
@@ -45,7 +51,7 @@ public class SyncOp
 [MessagePackObject(keyAsPropertyName: true)]
 public class SyncBatch
 {
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     public int Version { get; set; } = CurrentVersion;
     public List<SyncOp> Ops { get; set; } = [];
