@@ -477,6 +477,9 @@ public class EntityHierarchyView(EntityManager entityManager, GPoseService gPose
             if(ImGui.MenuItem("Live sync", "", item.Live))
                 sync.SetLive(item, !item.Live);
 
+            if(ImGui.MenuItem("Resync this with me"))
+                sync.ResyncWithMe(item);
+
             if(item.Kind is Sync.Kinds.ActorSyncKind)
             {
                 if(ImGui.MenuItem("Apply MCDF..."))

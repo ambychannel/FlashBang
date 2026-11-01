@@ -44,6 +44,9 @@ public class SyncOp
 
     // An answer to a Repair. Not a new edit, so it doesn't compete on revision.
     public bool IsRepair { get; set; }
+
+    // Someone pressed Resync: take this exactly, replacing whatever is here.
+    public bool IsResync { get; set; }
 }
 
 // What travels in one relay "op" message.
@@ -51,7 +54,7 @@ public class SyncOp
 [MessagePackObject(keyAsPropertyName: true)]
 public class SyncBatch
 {
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     public int Version { get; set; } = CurrentVersion;
     public List<SyncOp> Ops { get; set; } = [];

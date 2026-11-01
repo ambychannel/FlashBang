@@ -111,7 +111,7 @@ public class ActorSyncKind(
     {
         var usable = HasUsableTimeline(actor);
         item.Note = usable ? null : "Its animation can't be shared, so only Sync now sends its pose.";
-        return !usable && item.SyncNowRequested ? CapturePose(actor) : null;
+        return !usable && (item.SyncNowRequested || item.ResyncRequested) ? CapturePose(actor) : null;
     }
 
     private static unsafe bool HasUsableTimeline(ActorEntity actor)
@@ -127,7 +127,7 @@ public class ActorSyncKind(
             return null;
 
         // A copy plays what it's told. Only something a person did to it counts as a change.
-        if(!item.Mine && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
+        if(!item.Mine && !item.ResyncRequested && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
             return known;
 
         if(actor.TryGetCapability<CompanionCapability>(out var companion) && companion.GetCompanionAsEntity() is ActorEntity companionEntity)
@@ -378,6 +378,9 @@ public class ActorSyncKind(
     }
 
     public override bool IsDiffed(byte part) => part == EditsPart;
+
+    // An old whole pose would land on top of the exact bones.
+    public override bool ResyncsLastKnown(byte part) => part != PosePart;
 
     public override bool SendWhenSame(byte part) => part != AnimPart && part != EditsPart;
 
@@ -887,7 +890,7 @@ public class ActorSyncKind(
     {
         if(entity.TryGetCapability<PosingCapability>(out var posing))
         {
-            WriteBones(posing, dto, false);
+            WriteBones(posing, dto, false, item.WritingExact);
 
             if(state.HasPose)
                 item.Motion = new TransformMotion(posing.ModelPosing.Transform, dto.Model, DateTime.UtcNow);
@@ -901,14 +904,14 @@ public class ActorSyncKind(
             && companion.GetCompanionAsEntity() is ActorEntity companionEntity
             && companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
         {
-            WriteBones(companionPosing, dto, true);
+            WriteBones(companionPosing, dto, true, item.WritingExact);
 
             if(dto.CompanionModel.HasValue)
                 companionPosing.ModelPosing.Transform = dto.CompanionModel.Value;
         }
     }
 
-    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion)
+    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion, bool exact)
     {
         var poseInfo = posing.SkeletonPosing.PoseInfo;
         var wanted = new HashSet<BonePoseInfoId>();
@@ -920,7 +923,7 @@ public class ActorSyncKind(
 
             var id = new BonePoseInfoId(bone.Name, bone.Partial, (PoseInfoSlot)bone.Slot);
             wanted.Add(id);
-            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone);
+            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone, exact);
         }
 
         foreach(var (id, info) in poseInfo.Poses)

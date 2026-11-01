@@ -83,6 +83,9 @@ public abstract class SyncKind
     // Parts sent as changes, where every update matters and none can replace another.
     public virtual bool IsDiffed(byte part) => UsesValues(part);
 
+    // Whether a resync may send the last known value if the part can't be read right now.
+    public virtual bool ResyncsLastKnown(byte part) => true;
+
     // Whether Sync now sends this part even if nothing about it changed.
     public virtual bool SendWhenSame(byte part) => !IsDiffed(part);
 
@@ -158,6 +161,9 @@ public class PartTrack
     // When the creator next sends the true value, once things have gone quiet.
     public DateTime CheckpointAt { get; set; }
 
+    // The next apply sets this exactly, rather than adding to what's there.
+    public bool ApplyExact { get; set; }
+
     public DateTime NextRepair { get; set; }
 
     public DateTime NextCapture { get; set; }
@@ -211,6 +217,12 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
     // when Sync now is pressed. Our own items aren't shared at all until one of the two.
     public bool Live { get; set; }
     public bool SyncNowRequested { get; set; }
+
+    // Send everything about this exactly as it is here, for everyone to take.
+    public bool ResyncRequested { get; set; }
+
+    // Set for the length of one apply when a resync is being written, not compared.
+    public bool WritingExact { get; set; }
     public bool Shared { get; set; }
 
     // A line for the Sync window, like mod download progress.

@@ -412,9 +412,9 @@ public class SyncActorEdits
     }
 
     // Writes a bone's stacks, unless they're already that. IK bones get their default solver.
-    public static void Write(BonePoseInfo info, SyncBoneEdit bone)
+    public static void Write(BonePoseInfo info, SyncBoneEdit bone, bool exact = false)
     {
-        if(Near(StacksOf(info), bone.Stacks))
+        if(!exact && Near(StacksOf(info), bone.Stacks))
             return;
 
         info.ClearStacks();
