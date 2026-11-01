@@ -43,10 +43,6 @@ public class SyncBoneEdit
     public byte Slot { get; set; }
     public bool Companion { get; set; }
 
-    // Part of the face. Brio recalculates these against the head's current pose, so they only
-    // make sense as a set, and are never added up.
-    public bool Face { get; set; }
-
     // In an update, whether the stacks are plain values rather than how much each one changed.
     public bool Absolute { get; set; } = true;
     public List<SyncBoneStack> Stacks { get; set; } = [];
@@ -85,8 +81,6 @@ public class SyncActorEdits
         hash = (hash ^ slot) * 16777619u;
         return (hash ^ (companion ? 1u : 0u)) * 16777619u;
     }
-
-    private const int MaxBonesToRepairSingly = 16;
 
     public void Sort() => Bones.Sort((a, b) => a.Key.CompareTo(b.Key));
 
@@ -162,15 +156,9 @@ public class SyncActorEdits
     }
 
     // What changed from `last`; everything, as plain values, if there's no `last`.
-    //
-    // Stacks hold offsets in model space, which only make sense for the pose they were worked out
-    // against. Moving a bone adds to its stack and can be added up. But when Brio recalculates
-    // (at the end of a drag), or stacks come and go, or the face changes, the new stacks only make
-    // sense together, so the whole set goes as one. Mixing two people's recalculations bone by
-    // bone is what knocks the face out of the head.
     public static SyncActorEdits Diff(SyncActorEdits current, SyncActorEdits? last)
     {
-        if(last is null || IsRecalculated(current, last))
+        if(last is null)
             return new SyncActorEdits { Model = current.Model, CompanionModel = current.CompanionModel, ModelAbsolute = true, CompanionAbsolute = true, Full = true, Bones = current.Bones };
 
         var wire = new SyncActorEdits { Model = SyncCompare.Near(current.Model, last.Model) ? Unchanged : Change(last.Model, current.Model) };
@@ -227,28 +215,13 @@ public class SyncActorEdits
         return wire;
     }
 
-    private static bool IsRecalculated(SyncActorEdits current, SyncActorEdits last)
-    {
-        if(current.Bones.Count != last.Bones.Count)
-            return true;
-
-        for(var i = 0; i < current.Bones.Count; i++)
-        {
-            var (a, b) = (current.Bones[i], last.Bones[i]);
-            if(a.Key != b.Key || !SameShape(a.Stacks, b.Stacks) || (a.Face && !Near(a.Stacks, b.Stacks)))
-                return true;
-        }
-
-        return false;
-    }
-
     private static SyncBoneEdit ChangeOf(SyncBoneEdit bone, SyncBoneEdit last)
     {
         // Stacks were added or removed, so there's nothing to add them to.
         if(!SameShape(bone.Stacks, last.Stacks))
             return bone;
 
-        var change = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Face = bone.Face, Absolute = false };
+        var change = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Absolute = false };
         for(var s = 0; s < bone.Stacks.Count; s++)
         {
             var stack = bone.Stacks[s];
@@ -258,10 +231,8 @@ public class SyncActorEdits
     }
 
     // The whole set after an update.
-    public static SyncActorEdits Merge(SyncActorEdits wire, SyncActorEdits? last, out bool missedSome)
+    public static SyncActorEdits Merge(SyncActorEdits wire, SyncActorEdits? last)
     {
-        missedSome = false;
-
         var merged = new SyncActorEdits
         {
             Model = wire.ModelAbsolute || last is null ? wire.Model : Add(last.Model, wire.Model),
@@ -289,13 +260,10 @@ public class SyncActorEdits
             }
             else if(bones.TryGetValue(bone.Key, out var existing) && SameShape(existing.Stacks, bone.Stacks))
             {
-                bones[bone.Key] = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Face = bone.Face, Stacks = Add(existing.Stacks, bone.Stacks) };
+                bones[bone.Key] = new SyncBoneEdit { Name = bone.Name, Partial = bone.Partial, Slot = bone.Slot, Companion = bone.Companion, Stacks = Add(existing.Stacks, bone.Stacks) };
             }
-            else
-            {
-                // A change to stacks we don't have. Whoever asks gets the real thing.
-                missedSome = true;
-            }
+
+            // A change to stacks we don't have is put right by the next checkpoint.
         }
 
         merged.Bones = [.. bones.Values];
@@ -345,10 +313,10 @@ public class SyncActorEdits
             {
                 // Untouched by the update: whatever we have stays.
             }
-            else if(!target.Face && SameShape(mine.Stacks, before.Stacks) && SameShape(before.Stacks, target.Stacks))
+            else if(SameShape(mine.Stacks, before.Stacks) && SameShape(before.Stacks, target.Stacks))
             {
                 var change = ChangeOf(target, before);
-                bones[key] = new SyncBoneEdit { Name = mine.Name, Partial = mine.Partial, Slot = mine.Slot, Companion = mine.Companion, Face = mine.Face, Stacks = Add(mine.Stacks, change.Stacks) };
+                bones[key] = new SyncBoneEdit { Name = mine.Name, Partial = mine.Partial, Slot = mine.Slot, Companion = mine.Companion, Stacks = Add(mine.Stacks, change.Stacks) };
             }
             else
             {
@@ -416,8 +384,7 @@ public class SyncActorEdits
         return data;
     }
 
-    // The update that brings someone holding that digest up to `current`, in plain values. Only
-    // the bones that differ, unless they're the kind that only make sense as a whole set.
+    // The update that brings someone holding that digest up to `current`, in plain values.
     public static SyncActorEdits Repair(SyncActorEdits current, ReadOnlySpan<byte> digest)
     {
         var theirs = new Dictionary<uint, uint>(digest.Length / 8);
@@ -426,25 +393,13 @@ public class SyncActorEdits
 
         var wire = new SyncActorEdits { Model = current.Model, ModelAbsolute = true, CompanionModel = current.CompanionModel, CompanionAbsolute = true };
 
-        var whole = false;
         foreach(var bone in current.Bones)
         {
             if(!theirs.Remove(bone.Key, out var value) || value != ValueHash(bone))
-            {
                 wire.Bones.Add(bone);
-                whole |= bone.Face;
-            }
         }
 
         wire.Removed.AddRange(theirs.Keys);
-
-        if(whole || wire.Bones.Count + wire.Removed.Count > MaxBonesToRepairSingly)
-        {
-            wire.Full = true;
-            wire.Bones = current.Bones;
-            wire.Removed = [];
-        }
-
         return wire;
     }
 
@@ -457,9 +412,9 @@ public class SyncActorEdits
     }
 
     // Writes a bone's stacks, unless they're already that. IK bones get their default solver.
-    public static void Write(BonePoseInfo info, SyncBoneEdit bone, bool exact = false)
+    public static void Write(BonePoseInfo info, SyncBoneEdit bone)
     {
-        if(!exact && Near(StacksOf(info), bone.Stacks))
+        if(Near(StacksOf(info), bone.Stacks))
             return;
 
         info.ClearStacks();

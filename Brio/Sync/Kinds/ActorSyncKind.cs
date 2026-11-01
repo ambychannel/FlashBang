@@ -111,7 +111,7 @@ public class ActorSyncKind(
     {
         var usable = HasUsableTimeline(actor);
         item.Note = usable ? null : "Its animation can't be shared, so only Sync now sends its pose.";
-        return !usable && (item.SyncNowRequested || item.ResyncRequested) ? CapturePose(actor) : null;
+        return !usable && item.SyncNowRequested ? CapturePose(actor) : null;
     }
 
     private static unsafe bool HasUsableTimeline(ActorEntity actor)
@@ -127,7 +127,7 @@ public class ActorSyncKind(
             return null;
 
         // A copy plays what it's told. Only something a person did to it counts as a change.
-        if(!item.Mine && !item.ResyncRequested && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
+        if(!item.Mine && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
             return known;
 
         if(actor.TryGetCapability<CompanionCapability>(out var companion) && companion.GetCompanionAsEntity() is ActorEntity companionEntity)
@@ -257,23 +257,6 @@ public class ActorSyncKind(
         return edits;
     }
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> FaceBones = new();
-
-    private static bool IsFaceBone(PosingCapability posing, BonePoseInfoId id)
-    {
-        if(id.Slot != PoseInfoSlot.Character)
-            return false;
-
-        if(FaceBones.TryGetValue(id.BoneName, out var known))
-            return known;
-
-        var bone = posing.SkeletonPosing.GetBone(id.BoneName, PoseInfoSlot.Character);
-        if(bone is null)
-            return false;
-
-        return FaceBones[id.BoneName] = bone.IsFaceBone || id.BoneName == "j_kao";
-    }
-
     private static void ReadBones(PosingCapability posing, SyncActorEdits edits, bool companion)
     {
         foreach(var (id, info) in posing.SkeletonPosing.PoseInfo.Poses)
@@ -287,7 +270,6 @@ public class ActorSyncKind(
                 Partial = id.Partial,
                 Slot = (byte)id.Slot,
                 Companion = companion,
-                Face = !companion && IsFaceBone(posing, id),
                 Stacks = SyncActorEdits.StacksOf(info),
             });
         }
@@ -397,9 +379,6 @@ public class ActorSyncKind(
 
     public override bool IsDiffed(byte part) => part == EditsPart;
 
-    // An old whole pose would land on top of the exact bones.
-    public override bool ResyncsLastKnown(byte part) => part != PosePart;
-
     public override bool SendWhenSame(byte part) => part != AnimPart && part != EditsPart;
 
     public override object ToWire(byte part, object value, object? last)
@@ -416,21 +395,16 @@ public class ActorSyncKind(
             return wire;
 
         var received = (SyncActorEdits)wire;
-        var merged = SyncActorEdits.Merge(received, last as SyncActorEdits, out var missedSome);
-        inSync = !missedSome && (!received.HasDigest || SyncActorEdits.DigestOf(merged) == received.Digest);
+        var merged = SyncActorEdits.Merge(received, last as SyncActorEdits);
+        inSync = !received.HasDigest || SyncActorEdits.DigestOf(merged) == received.Digest;
         return merged;
     }
 
     public override object Rebase(byte part, object current, object from, object to)
         => part == EditsPart ? SyncActorEdits.Rebase((SyncActorEdits)current, (SyncActorEdits)from, (SyncActorEdits)to) : to;
 
-    // A playing animation's frame goes out of date at once, so only a frozen one has a true value.
-    public override object? Checkpoint(byte part, object known) => part switch
-    {
-        EditsPart => SyncActorEdits.Checkpoint((SyncActorEdits)known),
-        AnimPart when ((SyncAnimState)known).Frozen => known,
-        _ => null,
-    };
+    public override object Checkpoint(byte part, object known)
+        => part == EditsPart ? SyncActorEdits.Checkpoint((SyncActorEdits)known) : known;
 
     public override byte[]? RepairDigest(byte part, object? known)
         => part == EditsPart ? SyncActorEdits.BoneDigest(known as SyncActorEdits) : null;
@@ -913,7 +887,7 @@ public class ActorSyncKind(
     {
         if(entity.TryGetCapability<PosingCapability>(out var posing))
         {
-            WriteBones(posing, dto, false, item.WritingExact);
+            WriteBones(posing, dto, false);
 
             if(state.HasPose)
                 item.Motion = new TransformMotion(posing.ModelPosing.Transform, dto.Model, DateTime.UtcNow);
@@ -927,14 +901,14 @@ public class ActorSyncKind(
             && companion.GetCompanionAsEntity() is ActorEntity companionEntity
             && companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
         {
-            WriteBones(companionPosing, dto, true, item.WritingExact);
+            WriteBones(companionPosing, dto, true);
 
             if(dto.CompanionModel.HasValue)
                 companionPosing.ModelPosing.Transform = dto.CompanionModel.Value;
         }
     }
 
-    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion, bool exact)
+    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion)
     {
         var poseInfo = posing.SkeletonPosing.PoseInfo;
         var wanted = new HashSet<BonePoseInfoId>();
@@ -946,7 +920,7 @@ public class ActorSyncKind(
 
             var id = new BonePoseInfoId(bone.Name, bone.Partial, (PoseInfoSlot)bone.Slot);
             wanted.Add(id);
-            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone, exact);
+            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone);
         }
 
         foreach(var (id, info) in poseInfo.Poses)

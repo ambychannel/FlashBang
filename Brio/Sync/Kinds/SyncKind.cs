@@ -78,13 +78,10 @@ public abstract class SyncKind
     }
 
     // The true value, sent by the creator once things go quiet, to line everyone up.
-    public virtual object? Checkpoint(byte part, object known) => IsDiffed(part) ? ToWire(part, known, null) : null;
+    public virtual object Checkpoint(byte part, object known) => ToWire(part, known, null);
 
     // Parts sent as changes, where every update matters and none can replace another.
     public virtual bool IsDiffed(byte part) => UsesValues(part);
-
-    // Whether a resync may send the last known value if the part can't be read right now.
-    public virtual bool ResyncsLastKnown(byte part) => true;
 
     // Whether Sync now sends this part even if nothing about it changed.
     public virtual bool SendWhenSame(byte part) => !IsDiffed(part);
@@ -102,10 +99,10 @@ public abstract class SyncKind
     }
 
     // A digest of what we have, for asking a player for only what differs.
-    public virtual byte[]? RepairDigest(byte part, object? known) => UsesValues(part) ? [] : null;
+    public virtual byte[]? RepairDigest(byte part, object? known) => null;
 
     // The update that brings someone holding that digest up to what we have.
-    public virtual object? RepairAnswer(byte part, object known, byte[] digest) => UsesValues(part) ? ToWire(part, known, null) : null;
+    public virtual object? RepairAnswer(byte part, object known, byte[] digest) => null;
 
     // Decodes and checks one part from another player. Null means it's dropped.
     public abstract object? Decode(byte part, byte[] compressed);
@@ -160,13 +157,6 @@ public class PartTrack
 
     // When the creator next sends the true value, once things have gone quiet.
     public DateTime CheckpointAt { get; set; }
-    public DateTime NextHeartbeat { get; set; }
-
-    // When we last sent a change of our own.
-    public DateTime LastLocalChange { get; set; }
-
-    // The next apply sets this exactly, rather than adding to what's there.
-    public bool ApplyExact { get; set; }
 
     public DateTime NextRepair { get; set; }
 
@@ -221,12 +211,6 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
     // when Sync now is pressed. Our own items aren't shared at all until one of the two.
     public bool Live { get; set; }
     public bool SyncNowRequested { get; set; }
-
-    // Send everything about this exactly as it is here, for everyone to take.
-    public bool ResyncRequested { get; set; }
-
-    // Set for the length of one apply when a part must be written exactly, not compared.
-    public bool WritingExact { get; set; }
     public bool Shared { get; set; }
 
     // A line for the Sync window, like mod download progress.

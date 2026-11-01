@@ -23,7 +23,7 @@ public static class SyncValidation
     private const int MaxGlamourerStateLength = 64 * 1024;
     private const int MaxPathLength = 256;
     private const int MaxBoneEdits = 4096;
-    private const int MaxStacksPerBone = 512;
+    private const int MaxStacksPerBone = 32;
 
     public static bool IsValid(LightDTO dto)
     {

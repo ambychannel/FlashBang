@@ -41,7 +41,6 @@ public class SyncPeer(string id, string name)
     internal FolderEntity? Folder { get; set; }
     internal SyncReassembler Reassembler { get; } = new();
     internal bool WarnedAboutVersion { get; set; }
-    internal DateTime NextResyncToast { get; set; }
 }
 
 // Shares what's in the Sync folder with everyone in the room who has agreed to sync, and shows
@@ -57,9 +56,7 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan CheckpointDelay = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan ActiveEditWindow = TimeSpan.FromSeconds(1.5);
+    private static readonly TimeSpan CheckpointDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RepairInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DiscoverInterval = TimeSpan.FromMilliseconds(500);
     private const double SlowUpdateMs = 2;
@@ -281,20 +278,6 @@ public class SceneSyncService : MediatorSubscriberBase
         item.Note = null;
         if(live)
             item.SyncNowRequested = true;
-    }
-
-    // Everyone takes this item exactly as it is here, whoever made it.
-    public void ResyncWithMe(SyncItem item) => item.ResyncRequested = true;
-
-    // Everyone takes everything shared exactly as it is here. Our own things nobody has been
-    // given yet stay private.
-    public void ResyncEveryoneWithMe()
-    {
-        foreach(var item in _items.Values)
-        {
-            if(!item.Mine || item.Shared)
-                item.ResyncRequested = true;
-        }
     }
 
     // Puts an MCDF on any actor in the Sync folder. Everyone syncing gets the file and loads it.
@@ -705,8 +688,6 @@ public class SceneSyncService : MediatorSubscriberBase
             return;
         }
 
-        var now = DateTime.UtcNow;
-
         foreach(var op in batch.Ops.Take(SyncLimits.MaxOpsPerBatch))
         {
             _items.TryGetValue(op.SyncId, out var item);
@@ -736,12 +717,6 @@ public class SceneSyncService : MediatorSubscriberBase
             if(kind is null || op.Part >= kind.PartCount)
                 continue;
 
-            if(op.IsResync && now >= peer.NextResyncToast)
-            {
-                peer.NextResyncToast = now + TimeSpan.FromSeconds(5);
-                Brio.PopToast($"{peer.Name} resynced everyone to their version.", "FlashBang Sync", NotificationType.Info);
-            }
-
             if(item is not null && item.Kind != kind)
                 continue;
 
@@ -765,13 +740,7 @@ public class SceneSyncService : MediatorSubscriberBase
             }
 
             if(value is null)
-            {
-                // Couldn't be used. If it was a change, what we have is now wrong, so ask for it again.
-                Brio.Log.Warning($"FlashBang: dropped a {op.Type} update from {peer.Name}.");
-                if(item is not null && kind.IsDiffed(op.Part))
-                    RequestRepair(item, op.Part, peer, DateTime.UtcNow);
                 continue;
-            }
 
             if(item is null)
             {
@@ -787,28 +756,6 @@ public class SceneSyncService : MediatorSubscriberBase
 
             var track = item.Tracks[op.Part];
             var diffed = kind.IsDiffed(op.Part);
-
-            // Someone pressed Resync: this replaces whatever we have, changes in progress and all.
-            if(op.IsResync)
-            {
-                track.Revision = Math.Max(track.Revision, op.Revision);
-                track.Writer = peer.Id;
-
-                if(!item.Mine && item.Creator == peer)
-                    item.Territory = op.Territory;
-
-                var exact = kind.Merge(op.Part, value, null, out _);
-                if(exact is null)
-                    continue;
-
-                track.ApplyFrom = null;
-                track.ApplyExact = true;
-                track.Baseline = null;
-                track.LastKnown = exact;
-                item.Parts[op.Part] = exact;
-                item.Dirty.Add(op.Part);
-                continue;
-            }
 
             // Changes add up, so they don't compete. Only whole values do.
             if(!op.IsRepair && !diffed)
@@ -826,29 +773,13 @@ public class SceneSyncService : MediatorSubscriberBase
             var before = track.LastKnown;
             var merged = kind.Merge(op.Part, value, before, out var inSync);
             if(merged is null)
-            {
-                Brio.Log.Warning($"FlashBang: couldn't use a {op.Type} update from {peer.Name}.");
-                RequestRepair(item, op.Part, peer, DateTime.UtcNow);
                 continue;
-            }
 
             if(!inSync)
                 RequestRepair(item, op.Part, peer, DateTime.UtcNow);
 
-            if(item.Mine && diffed && track.CheckpointAt == default)
+            if(item.Mine && diffed)
                 track.CheckpointAt = DateTime.UtcNow + CheckpointDelay;
-
-            // The true value, and nobody's working on this here: set it, even if what we believed
-            // already matched, because what's on screen may not.
-            if(op.IsRepair && !IsBeingEdited(item, track))
-            {
-                track.ApplyFrom = null;
-                track.ApplyExact = true;
-                track.LastKnown = merged;
-                item.Parts[op.Part] = merged;
-                item.Dirty.Add(op.Part);
-                continue;
-            }
 
             // What we already have, give or take noise: nothing to apply.
             if(before is not null && kind.IsSame(op.Part, merged, before))
@@ -865,20 +796,6 @@ public class SceneSyncService : MediatorSubscriberBase
             item.Parts[op.Part] = merged;
             item.Dirty.Add(op.Part);
         }
-    }
-
-    // Whether a difference from the true value might be someone's own change rather than a
-    // mistake. On something Live, changes go out as they're made, so only very recent ones count.
-    // Otherwise they're kept until Sync now, and you can only pose what you have selected.
-    private bool IsBeingEdited(SyncItem item, PartTrack track)
-    {
-        if(item.Mine)
-            return true;
-
-        if(item.Live)
-            return DateTime.UtcNow - track.LastLocalChange < ActiveEditWindow;
-
-        return item.Entity is not null && _entityManager.SelectedEntity?.Id == item.Entity.Id;
     }
 
     // Our copy of a part has fallen out of step: send a digest of it, and get back only what differs.
@@ -1010,36 +927,20 @@ public class SceneSyncService : MediatorSubscriberBase
                 continue;
 
             var applying = item.Dirty.ToList();
-            var exact = false;
-            foreach(var part in applying)
-                exact |= item.Tracks[part].ApplyExact;
-
             foreach(var part in applying)
             {
                 if(kind.IsDiffed(part))
                     RebasePart(item, part);
             }
 
-            item.WritingExact = exact;
             try
             {
                 kind.Apply(item);
-
-                // Straight to it, without a glide.
-                if(exact)
-                    kind.Animate(item, now + TransformMotion.Duration);
             }
             catch(Exception ex)
             {
                 Brio.Log.Warning(ex, $"FlashBang: couldn't update a {kind.Type} from {item.CreatorName}.");
                 item.Dirty.Clear();
-            }
-
-            item.WritingExact = false;
-            foreach(var part in applying)
-            {
-                if(!item.Dirty.Contains(part))
-                    item.Tracks[part].ApplyExact = false;
             }
 
             Settle(item, applying.Where(p => !item.Dirty.Contains(p)), now);
@@ -1406,12 +1307,6 @@ public class SceneSyncService : MediatorSubscriberBase
             if(item.Mine)
                 item.Territory = territory;
 
-            if(item.ResyncRequested)
-            {
-                SendResync(item, now);
-                continue;
-            }
-
             var force = item.SyncNowRequested;
             var sent = false;
 
@@ -1439,93 +1334,25 @@ public class SceneSyncService : MediatorSubscriberBase
         }
     }
 
-    // The creator sends the true values about once a second while an item is being changed, and
-    // every so often when it isn't. Changes add up the same everywhere unless one was lost or
-    // rotations landed in a different order, and this puts that right. Anything someone is
-    // changing at that moment is kept (see IsBeingEdited).
+    // Once an item has gone quiet, its creator sends the true values. Changes add up the same
+    // everywhere unless one was lost or rotations landed in a different order, and this puts
+    // that right. Anything someone is changing at that moment is kept (see RebasePart).
     private void SendCheckpoints(SyncItem item, DateTime now)
     {
-        if(!item.Shared)
-            return;
-
         for(byte part = 0; part < item.Tracks.Length; part++)
         {
             var track = item.Tracks[part];
-            if(track.LastKnown is null || !(track.CheckpointAt != default ? now >= track.CheckpointAt : now >= track.NextHeartbeat))
+            if(track.CheckpointAt == default || now < track.CheckpointAt || track.LastKnown is null)
                 continue;
 
             track.CheckpointAt = default;
-            track.NextHeartbeat = now + HeartbeatInterval;
 
-            if(item.Kind.Checkpoint(part, track.LastKnown) is not { } checkpoint)
-                continue;
-
-            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, checkpoint));
+            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, item.Kind.Checkpoint(part, track.LastKnown)));
             foreach(var op in ops)
                 op.IsRepair = true;
 
             _outbox.Enqueue(ops, null, false);
         }
-    }
-
-    // Sends every part of an item in full, exactly as it is here.
-    private void SendResync(SyncItem item, DateTime now)
-    {
-        var kind = item.Kind;
-        _outbox.DropItem(item.Id);
-
-        for(byte part = 0; part < kind.PartCount; part++)
-        {
-            if(!item.Mine && !kind.Editable(part))
-                continue;
-
-            var track = item.Tracks[part];
-
-            object? value;
-            byte[] bytes;
-            try
-            {
-                value = kind.Capture(item, part) ?? (kind.ResyncsLastKnown(part) ? track.LastKnown : null);
-                if(value is null)
-                    continue;
-
-                bytes = kind.EncodeWire(part, kind.ToWire(part, value, null));
-            }
-            catch(Exception ex)
-            {
-                Brio.Log.Warning(ex, $"FlashBang: couldn't read {item.Entity?.FriendlyName} to resync it.");
-                continue;
-            }
-
-            track.LastKnown = value;
-            track.Baseline = bytes;
-            track.Absorb = false;
-            track.ApplyFrom = null;
-            track.CheckpointAt = default;
-            track.NextHeartbeat = now + HeartbeatInterval;
-            track.Revision++;
-            track.Writer = _me;
-            item.Parts[part] = value;
-            item.Dirty.Remove(part);
-
-            var ops = SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes);
-            foreach(var op in ops)
-            {
-                op.IsResync = true;
-
-                // Only an item's creator can introduce it to someone who doesn't have it.
-                op.IsRepair = !item.Mine;
-            }
-
-            if(AnyLinked)
-                _outbox.Enqueue(ops, null, false);
-        }
-
-        if(item.Mine)
-            item.Shared = true;
-
-        item.ResyncRequested = false;
-        item.SyncNowRequested = false;
     }
 
     // Reads one part and sends it if it changed (or if forced). Returns whether it was sent.
@@ -1605,8 +1432,7 @@ public class SceneSyncService : MediatorSubscriberBase
 
         track.LastKnown = kind.Merge(part, wire, last, out _) ?? value;
         item.Parts[part] = value;
-        track.LastLocalChange = now;
-        if(diffed && item.Mine && track.CheckpointAt == default)
+        if(diffed && item.Mine)
             track.CheckpointAt = now + CheckpointDelay;
         track.Revision++;
         track.Writer = _me;
