@@ -257,6 +257,23 @@ public class ActorSyncKind(
         return edits;
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> FaceBones = new();
+
+    private static bool IsFaceBone(PosingCapability posing, BonePoseInfoId id)
+    {
+        if(id.Slot != PoseInfoSlot.Character)
+            return false;
+
+        if(FaceBones.TryGetValue(id.BoneName, out var known))
+            return known;
+
+        var bone = posing.SkeletonPosing.GetBone(id.BoneName, PoseInfoSlot.Character);
+        if(bone is null)
+            return false;
+
+        return FaceBones[id.BoneName] = bone.IsFaceBone || id.BoneName == "j_kao";
+    }
+
     private static void ReadBones(PosingCapability posing, SyncActorEdits edits, bool companion)
     {
         foreach(var (id, info) in posing.SkeletonPosing.PoseInfo.Poses)
@@ -270,6 +287,7 @@ public class ActorSyncKind(
                 Partial = id.Partial,
                 Slot = (byte)id.Slot,
                 Companion = companion,
+                Face = !companion && IsFaceBone(posing, id),
                 Stacks = SyncActorEdits.StacksOf(info),
             });
         }
@@ -395,16 +413,21 @@ public class ActorSyncKind(
             return wire;
 
         var received = (SyncActorEdits)wire;
-        var merged = SyncActorEdits.Merge(received, last as SyncActorEdits);
-        inSync = !received.HasDigest || SyncActorEdits.DigestOf(merged) == received.Digest;
+        var merged = SyncActorEdits.Merge(received, last as SyncActorEdits, out var missedSome);
+        inSync = !missedSome && (!received.HasDigest || SyncActorEdits.DigestOf(merged) == received.Digest);
         return merged;
     }
 
     public override object Rebase(byte part, object current, object from, object to)
         => part == EditsPart ? SyncActorEdits.Rebase((SyncActorEdits)current, (SyncActorEdits)from, (SyncActorEdits)to) : to;
 
-    public override object Checkpoint(byte part, object known)
-        => part == EditsPart ? SyncActorEdits.Checkpoint((SyncActorEdits)known) : known;
+    // A playing animation's frame goes out of date at once, so only a frozen one has a true value.
+    public override object? Checkpoint(byte part, object known) => part switch
+    {
+        EditsPart => SyncActorEdits.Checkpoint((SyncActorEdits)known),
+        AnimPart when ((SyncAnimState)known).Frozen => known,
+        _ => null,
+    };
 
     public override byte[]? RepairDigest(byte part, object? known)
         => part == EditsPart ? SyncActorEdits.BoneDigest(known as SyncActorEdits) : null;
@@ -887,7 +910,7 @@ public class ActorSyncKind(
     {
         if(entity.TryGetCapability<PosingCapability>(out var posing))
         {
-            WriteBones(posing, dto, false);
+            WriteBones(posing, dto, false, item.WritingExact);
 
             if(state.HasPose)
                 item.Motion = new TransformMotion(posing.ModelPosing.Transform, dto.Model, DateTime.UtcNow);
@@ -901,14 +924,14 @@ public class ActorSyncKind(
             && companion.GetCompanionAsEntity() is ActorEntity companionEntity
             && companionEntity.TryGetCapability<PosingCapability>(out var companionPosing))
         {
-            WriteBones(companionPosing, dto, true);
+            WriteBones(companionPosing, dto, true, item.WritingExact);
 
             if(dto.CompanionModel.HasValue)
                 companionPosing.ModelPosing.Transform = dto.CompanionModel.Value;
         }
     }
 
-    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion)
+    private static void WriteBones(PosingCapability posing, SyncActorEdits dto, bool companion, bool exact)
     {
         var poseInfo = posing.SkeletonPosing.PoseInfo;
         var wanted = new HashSet<BonePoseInfoId>();
@@ -920,7 +943,7 @@ public class ActorSyncKind(
 
             var id = new BonePoseInfoId(bone.Name, bone.Partial, (PoseInfoSlot)bone.Slot);
             wanted.Add(id);
-            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone);
+            SyncActorEdits.Write(poseInfo.GetPoseInfo(id), bone, exact);
         }
 
         foreach(var (id, info) in poseInfo.Poses)

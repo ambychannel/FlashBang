@@ -56,7 +56,9 @@ public class SceneSyncService : MediatorSubscriberBase
     private static readonly TimeSpan SpawnTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DeleteWindow = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan CheckpointDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CheckpointDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ActiveEditWindow = TimeSpan.FromSeconds(1.5);
     private static readonly TimeSpan RepairInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DiscoverInterval = TimeSpan.FromMilliseconds(500);
     private const double SlowUpdateMs = 2;
@@ -740,7 +742,13 @@ public class SceneSyncService : MediatorSubscriberBase
             }
 
             if(value is null)
+            {
+                // Couldn't be used. If it was a change, what we have is now wrong, so ask for it again.
+                Brio.Log.Warning($"FlashBang: dropped a {op.Type} update from {peer.Name}.");
+                if(item is not null && kind.IsDiffed(op.Part))
+                    RequestRepair(item, op.Part, peer, DateTime.UtcNow);
                 continue;
+            }
 
             if(item is null)
             {
@@ -773,13 +781,29 @@ public class SceneSyncService : MediatorSubscriberBase
             var before = track.LastKnown;
             var merged = kind.Merge(op.Part, value, before, out var inSync);
             if(merged is null)
+            {
+                Brio.Log.Warning($"FlashBang: couldn't use a {op.Type} update from {peer.Name}.");
+                RequestRepair(item, op.Part, peer, DateTime.UtcNow);
                 continue;
+            }
 
             if(!inSync)
                 RequestRepair(item, op.Part, peer, DateTime.UtcNow);
 
-            if(item.Mine && diffed)
+            if(item.Mine && diffed && track.CheckpointAt == default)
                 track.CheckpointAt = DateTime.UtcNow + CheckpointDelay;
+
+            // The true value, and nobody's working on this here: set it, even if what we believed
+            // already matched, because what's on screen may not.
+            if(op.IsRepair && !IsBeingEdited(item, track))
+            {
+                track.ApplyFrom = null;
+                track.ApplyExact = true;
+                track.LastKnown = merged;
+                item.Parts[op.Part] = merged;
+                item.Dirty.Add(op.Part);
+                continue;
+            }
 
             // What we already have, give or take noise: nothing to apply.
             if(before is not null && kind.IsSame(op.Part, merged, before))
@@ -796,6 +820,20 @@ public class SceneSyncService : MediatorSubscriberBase
             item.Parts[op.Part] = merged;
             item.Dirty.Add(op.Part);
         }
+    }
+
+    // Whether a difference from the true value might be someone's own change rather than a
+    // mistake. On something Live, changes go out as they're made, so only very recent ones count.
+    // Otherwise they're kept until Sync now, and you can only pose what you have selected.
+    private bool IsBeingEdited(SyncItem item, PartTrack track)
+    {
+        if(item.Mine)
+            return true;
+
+        if(item.Live)
+            return DateTime.UtcNow - track.LastLocalChange < ActiveEditWindow;
+
+        return item.Entity is not null && _entityManager.SelectedEntity?.Id == item.Entity.Id;
     }
 
     // Our copy of a part has fallen out of step: send a digest of it, and get back only what differs.
@@ -927,20 +965,36 @@ public class SceneSyncService : MediatorSubscriberBase
                 continue;
 
             var applying = item.Dirty.ToList();
+            var exact = false;
+            foreach(var part in applying)
+                exact |= item.Tracks[part].ApplyExact;
+
             foreach(var part in applying)
             {
                 if(kind.IsDiffed(part))
                     RebasePart(item, part);
             }
 
+            item.WritingExact = exact;
             try
             {
                 kind.Apply(item);
+
+                // Straight to it, without a glide.
+                if(exact)
+                    kind.Animate(item, now + TransformMotion.Duration);
             }
             catch(Exception ex)
             {
                 Brio.Log.Warning(ex, $"FlashBang: couldn't update a {kind.Type} from {item.CreatorName}.");
                 item.Dirty.Clear();
+            }
+
+            item.WritingExact = false;
+            foreach(var part in applying)
+            {
+                if(!item.Dirty.Contains(part))
+                    item.Tracks[part].ApplyExact = false;
             }
 
             Settle(item, applying.Where(p => !item.Dirty.Contains(p)), now);
@@ -1334,20 +1388,28 @@ public class SceneSyncService : MediatorSubscriberBase
         }
     }
 
-    // Once an item has gone quiet, its creator sends the true values. Changes add up the same
-    // everywhere unless one was lost or rotations landed in a different order, and this puts
-    // that right. Anything someone is changing at that moment is kept (see RebasePart).
+    // The creator sends the true values about once a second while an item is being changed, and
+    // every so often when it isn't. Changes add up the same everywhere unless one was lost or
+    // rotations landed in a different order, and this puts that right. Anything someone is
+    // changing at that moment is kept (see IsBeingEdited).
     private void SendCheckpoints(SyncItem item, DateTime now)
     {
+        if(!item.Shared)
+            return;
+
         for(byte part = 0; part < item.Tracks.Length; part++)
         {
             var track = item.Tracks[part];
-            if(track.CheckpointAt == default || now < track.CheckpointAt || track.LastKnown is null)
+            if(track.LastKnown is null || !(track.CheckpointAt != default ? now >= track.CheckpointAt : now >= track.NextHeartbeat))
                 continue;
 
             track.CheckpointAt = default;
+            track.NextHeartbeat = now + HeartbeatInterval;
 
-            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, item.Kind.Checkpoint(part, track.LastKnown)));
+            if(item.Kind.Checkpoint(part, track.LastKnown) is not { } checkpoint)
+                continue;
+
+            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, checkpoint));
             foreach(var op in ops)
                 op.IsRepair = true;
 
@@ -1432,7 +1494,8 @@ public class SceneSyncService : MediatorSubscriberBase
 
         track.LastKnown = kind.Merge(part, wire, last, out _) ?? value;
         item.Parts[part] = value;
-        if(diffed && item.Mine)
+        track.LastLocalChange = now;
+        if(diffed && item.Mine && track.CheckpointAt == default)
             track.CheckpointAt = now + CheckpointDelay;
         track.Revision++;
         track.Writer = _me;
