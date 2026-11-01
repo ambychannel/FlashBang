@@ -47,6 +47,10 @@ public class SyncOp
 
     // Someone pressed Resync: take this exactly, replacing whatever is here.
     public bool IsResync { get; set; }
+
+    // How many resyncs this item had been through when this was sent. Anything from before the
+    // latest one is out of date, however it got delayed.
+    public uint Epoch { get; set; }
 }
 
 // What travels in one relay "op" message.
@@ -54,7 +58,7 @@ public class SyncOp
 [MessagePackObject(keyAsPropertyName: true)]
 public class SyncBatch
 {
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     public int Version { get; set; } = CurrentVersion;
     public List<SyncOp> Ops { get; set; } = [];

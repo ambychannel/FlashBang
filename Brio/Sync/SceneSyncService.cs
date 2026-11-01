@@ -369,7 +369,7 @@ public class SceneSyncService : MediatorSubscriberBase
             item.SyncNowRequested = true;
 
         var bytes = item.Kind.EncodeWire(ActorSyncKind.LookPart, look);
-        Broadcast(SyncCodec.Split(item.Id, item.Kind.Type, ActorSyncKind.LookPart, item.Territory, track.Revision, bytes));
+        Broadcast(SyncCodec.Split(item, ActorSyncKind.LookPart, track.Revision, bytes));
     }
 
     // Deletes the item for everyone. Works on anything in the Sync folder, even if we lost
@@ -777,6 +777,21 @@ public class SceneSyncService : MediatorSubscriberBase
                 _items[op.SyncId] = item = new SyncItem(op.SyncId, kind, peer);
             }
 
+            // From before the latest resync: whoever sent it just hadn't heard yet.
+            if(op.Epoch < item.Epoch)
+                continue;
+
+            if(op.IsResync)
+            {
+                // Two people pressing at once: everyone settles on the same one.
+                if(op.Epoch == item.Epoch && string.CompareOrdinal(peer.Id, item.EpochWriter) < 0)
+                    continue;
+
+                item.EpochWriter = peer.Id;
+            }
+
+            item.Epoch = op.Epoch;
+
             var track = item.Tracks[op.Part];
             var diffed = kind.IsDiffed(op.Part);
 
@@ -872,7 +887,7 @@ public class SceneSyncService : MediatorSubscriberBase
         if(track.LastKnown is null || item.Kind.RepairAnswer(op.Part, track.LastKnown, op.Data) is not { } answer)
             return;
 
-        var ops = SyncCodec.Split(item.Id, item.Kind.Type, op.Part, item.Territory, track.Revision, item.Kind.EncodeWire(op.Part, answer));
+        var ops = SyncCodec.Split(item, op.Part, track.Revision, item.Kind.EncodeWire(op.Part, answer));
         foreach(var repair in ops)
             repair.IsRepair = true;
 
@@ -1414,7 +1429,7 @@ public class SceneSyncService : MediatorSubscriberBase
 
             track.CheckpointAt = default;
 
-            var ops = SyncCodec.Split(item.Id, item.Kind.Type, part, item.Territory, track.Revision, item.Kind.EncodeWire(part, item.Kind.Checkpoint(part, track.LastKnown)));
+            var ops = SyncCodec.Split(item, part, track.Revision, item.Kind.EncodeWire(part, item.Kind.Checkpoint(part, track.LastKnown)));
             foreach(var op in ops)
                 op.IsRepair = true;
 
@@ -1427,6 +1442,8 @@ public class SceneSyncService : MediatorSubscriberBase
     {
         var kind = item.Kind;
         _outbox.DropItem(item.Id);
+        item.Epoch++;
+        item.EpochWriter = _me;
 
         for(byte part = 0; part < kind.PartCount; part++)
         {
@@ -1461,7 +1478,7 @@ public class SceneSyncService : MediatorSubscriberBase
             item.Parts[part] = value;
             item.Dirty.Remove(part);
 
-            var ops = SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes);
+            var ops = SyncCodec.Split(item, part, track.Revision, bytes);
             foreach(var op in ops)
             {
                 op.IsResync = true;
@@ -1564,7 +1581,7 @@ public class SceneSyncService : MediatorSubscriberBase
         track.Writer = _me;
 
         if(AnyLinked)
-            _outbox.Enqueue(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes), null, !diffed);
+            _outbox.Enqueue(SyncCodec.Split(item, part, track.Revision, bytes), null, !diffed);
 
         try
         {
@@ -1591,7 +1608,7 @@ public class SceneSyncService : MediatorSubscriberBase
 
                 var kind = item.Kind;
                 var bytes = kind.EncodeWire(part, kind.ToWire(part, track.LastKnown, null));
-                _outbox.Enqueue(SyncCodec.Split(item.Id, kind.Type, part, item.Territory, track.Revision, bytes), peer.Id, !kind.IsDiffed(part));
+                _outbox.Enqueue(SyncCodec.Split(item, part, track.Revision, bytes), peer.Id, !kind.IsDiffed(part));
             }
         }
     }

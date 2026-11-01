@@ -221,6 +221,10 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
     // Send everything about this exactly as it is here, for everyone to take.
     public bool ResyncRequested { get; set; }
 
+    // The latest resync of this item, and who pressed it.
+    public uint Epoch { get; set; }
+    public string EpochWriter { get; set; } = "";
+
     // Set for the length of one apply when a resync is being written, not compared.
     public bool WritingExact { get; set; }
     public bool Shared { get; set; }

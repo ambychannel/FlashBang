@@ -1,3 +1,4 @@
+using Brio.Sync.Kinds;
 using MessagePack;
 using System;
 using System.Collections.Generic;
@@ -48,6 +49,14 @@ public static class SyncCodec
         {
             return null;
         }
+    }
+
+    public static List<SyncOp> Split(SyncItem item, byte part, uint revision, byte[] data)
+    {
+        var ops = Split(item.Id, item.Kind.Type, part, item.Territory, revision, data);
+        foreach(var op in ops)
+            op.Epoch = item.Epoch;
+        return ops;
     }
 
     public static List<SyncOp> Split(Guid id, SyncEntityType type, byte part, uint territory, uint revision, byte[] data)
