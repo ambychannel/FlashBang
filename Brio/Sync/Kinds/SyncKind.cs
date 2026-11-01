@@ -83,6 +83,9 @@ public abstract class SyncKind
     // Parts sent as changes, where every update matters and none can replace another.
     public virtual bool IsDiffed(byte part) => UsesValues(part);
 
+    // Whether a resync may send the last known value if the part can't be read right now.
+    public virtual bool ResyncsLastKnown(byte part) => true;
+
     // Whether Sync now sends this part even if nothing about it changed.
     public virtual bool SendWhenSame(byte part) => !IsDiffed(part);
 
@@ -218,6 +221,9 @@ public class SyncItem(Guid id, SyncKind kind, SyncPeer? creator)
     // when Sync now is pressed. Our own items aren't shared at all until one of the two.
     public bool Live { get; set; }
     public bool SyncNowRequested { get; set; }
+
+    // Send everything about this exactly as it is here, for everyone to take.
+    public bool ResyncRequested { get; set; }
 
     // Set for the length of one apply when a part must be written exactly, not compared.
     public bool WritingExact { get; set; }

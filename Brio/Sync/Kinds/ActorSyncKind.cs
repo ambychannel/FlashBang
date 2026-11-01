@@ -111,7 +111,7 @@ public class ActorSyncKind(
     {
         var usable = HasUsableTimeline(actor);
         item.Note = usable ? null : "Its animation can't be shared, so only Sync now sends its pose.";
-        return !usable && item.SyncNowRequested ? CapturePose(actor) : null;
+        return !usable && (item.SyncNowRequested || item.ResyncRequested) ? CapturePose(actor) : null;
     }
 
     private static unsafe bool HasUsableTimeline(ActorEntity actor)
@@ -127,7 +127,7 @@ public class ActorSyncKind(
             return null;
 
         // A copy plays what it's told. Only something a person did to it counts as a change.
-        if(!item.Mine && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
+        if(!item.Mine && !item.ResyncRequested && item.Tracks[AnimPart].LastKnown is SyncAnimState known && !ChangedByHand(actor, current, known))
             return known;
 
         if(actor.TryGetCapability<CompanionCapability>(out var companion) && companion.GetCompanionAsEntity() is ActorEntity companionEntity)
@@ -396,6 +396,9 @@ public class ActorSyncKind(
     }
 
     public override bool IsDiffed(byte part) => part == EditsPart;
+
+    // An old whole pose would land on top of the exact bones.
+    public override bool ResyncsLastKnown(byte part) => part != PosePart;
 
     public override bool SendWhenSame(byte part) => part != AnimPart && part != EditsPart;
 

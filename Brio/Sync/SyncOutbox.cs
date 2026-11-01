@@ -32,6 +32,9 @@ public class SyncOutbox
             queue.AddLast(new Entry(op, to));
     }
 
+    // Forgets everything queued for an item, about to be replaced by its exact state.
+    public void DropItem(Guid id) => Drop(id, null, null);
+
     public void Clear()
     {
         _live.Clear();

@@ -195,6 +195,12 @@ public class SyncWindow : Window, IDisposable
             return;
         }
 
+        if(ImBrio.Button("Resync everyone with me", FontAwesomeIcon.Sync))
+            _sync.ResyncEveryoneWithMe();
+        if(ImGui.IsItemHovered())
+            ImGui.SetTooltip("Everyone takes everything shared here exactly as you see it, replacing what they have. Use it if your screens have drifted apart and yours is right.");
+
+        ImGui.Spacing();
         ImGui.TextUnformatted("In the Sync folder");
 
         foreach(var item in items)
@@ -209,6 +215,9 @@ public class SyncWindow : Window, IDisposable
                 ImGui.SameLine();
                 if(ImGui.SmallButton("Sync now"))
                     _sync.SyncNow(item);
+                ImGui.SameLine();
+                if(ImGui.SmallButton("Resync with me"))
+                    _sync.ResyncWithMe(item);
                 ImGui.SameLine();
                 var live = item.Live;
                 if(ImGui.Checkbox("Live", ref live))
